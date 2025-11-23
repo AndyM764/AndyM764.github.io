@@ -1,0 +1,132 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Andy Mannikum - Engineering Portfolio</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            margin: 0;
+            padding: 0;
+            background: #121212;
+            color: #e0e0e0;
+        }
+        header {
+            background: #1f2937;
+            color: white;
+            padding: 30px 20px;
+            text-align: center;
+        }
+        nav {
+            background: #111827;
+            padding: 10px;
+            text-align: center;
+        }
+        nav a {
+            color: white;
+            margin: 0 15px;
+            text-decoration: none;
+            font-size: 18px;
+        }
+        .container {
+            width: 90%;
+            max-width: 900px;
+            margin: 30px auto;
+        }
+        .section {
+            background: #1e1e1e;
+            padding: 20px;
+            margin-bottom: 20px;
+            border-radius: 8px;
+        }
+        img {
+            width: 100%;
+            border-radius: 8px;
+        }
+        pre {
+            background: #2d2d2d;
+            color: #f8f8f2;
+            padding: 15px;
+            border-radius: 8px;
+            overflow-x: auto;
+        }
+        h2 {
+            margin-top: 0;
+        }
+    </style>
+</head>
+<body>
+    <header>
+        <h1>Andy Mannikum - Engineering Portfolio</h1>
+        <p>Engineering student passionate about electronics, control systems, and simulation.</p>
+    </header>
+
+    <nav>
+        <a href="#about">About</a>
+        <a href="#projects">Projects</a>
+        <a href="#contact">Contact</a>
+    </nav>
+
+    <div class="container">
+        <section id="about" class="section">
+            <h2>About Me</h2>
+            <p>
+                I am a mechatronics engineering student with a passion for electronics, control systems, and simulation. This portfolio showcases my engineering projects, simulations, CAD designs, and hardware builds.
+            </p>
+        </section>
+
+        <section id="projects" class="section">
+            <h2>Projects</h2>
+
+            <h3>Heart Rate Monitor</h3>
+            <p>Designed and built a heart rate monitoring system using sensors and microcontrollers.</p>
+            <img src="heart_rate_monitor.jpg" alt="Heart Rate Monitor Project" />
+            <pre><code># Example code snippet (Python)
+import time
+for i in range(5):
+    print("Measuring heart rate")
+    time.sleep(1)
+</code></pre>
+
+            <hr />
+
+            <h3>Instrument Landing System Simulation</h3>
+            <p>Simulated the Lateral Beam Guidance System for aircraft landing using MATLAB/Simulink.</p>
+            <img src="ils_simulation.jpg" alt="ILS Simulation" />
+            <pre><code>% MATLAB example code
+theta = linspace(-pi, pi, 100);
+y = sin(theta);
+plot(theta, y);
+title('Lateral Beam Simulation');
+</code></pre>
+
+            <hr />
+
+            <h3>3D Bike Design (CAD)</h3>
+            <p>Designed a 3D model of a bike using CAD software with full assembly details.</p>
+            <img src="3d_bike.jpg" alt="3D Bike CAD Design" />
+
+            <hr />
+
+            <h3>Lift (Elevator) with 3 Floors</h3>
+            <p>Designed and built a lift system with stops at three floors, including control mechanisms and safety features.</p>
+            <img src="lift_design.jpg" alt="Lift Project" />
+            <pre><code>// Arduino example code
+int floor = 0;
+while(true){
+  check_buttons();
+  move_lift();
+}
+</code></pre>
+        </section>
+
+        <section id="contact" class="section">
+            <h2>Contact</h2>
+            <p>Email: andy.mannikum@example.com</p>
+            <p>LinkedIn: linkedin.com/in/andy-mannikum</p>
+            <p>GitHub: github.com/andy-mannikum</p>
+        </section>
+    </div>
+</body>
+</html>
