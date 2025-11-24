@@ -194,7 +194,7 @@
         id: 'ils',
         title: 'ILS Lateral Beam Guidance Simulation',
         short: 'MATLAB/Simulink simulation of lateral guidance for aircraft approaches',
-        images: ['ils_simulation.jpg'],
+        images: ['ils_simulation.jpeg'],
         writeup: `Built a lateral beam guidance model in MATLAB/Simulink to simulate path deviation correction during landing approach. Used control loops to stabilize lateral offset and tested with different wind disturbance profiles.`,
         code: `% MATLAB example (plot simulated lateral error)\ntheta = linspace(-pi, pi, 200);\nlateral_error = 0.1*sin(2*theta);\nplot(theta, lateral_error);\ntitle('Simulated Lateral Error');`
       },
@@ -210,7 +210,7 @@
         id: 'lift',
         title: 'Lift (3-floor Elevator)',
         short: 'Control system and hardware for a 3-floor lift prototype',
-        images: ['lift_design.jpg'],
+        images: ['lift_design.jpeg'],
         writeup: `Built a scale lift with floor detection, motor control, and safety interlocks. Implemented a state machine for floor sequencing and emergency stop logic.`,
         code: `// Pseudocode - main loop\nstate = IDLE;\nwhile(1){ handle_inputs(); update_state(); control_motor(); }`
       }
