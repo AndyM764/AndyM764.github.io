@@ -228,7 +228,14 @@
         short: 'MATLAB/Simulink simulation of lateral guidance for aircraft approaches',
         images: ['ils_simulation.jpeg'],
         writeup: `This project simulates an Instrument Landing System (ILS) Lateral Beam Guidance using MATLAB and Simulink. The model evaluates aircraft lateral deviation, beam capture behavior, glide path tracking, and response under wind disturbances. The system uses proportional guidance logic to correct course deviations and produce smooth, realistic approach behavior.`,
-        code: ``
+        code: ``,
+        reports: [
+    { name: "Specification – Part 1", file: "assets/reports/ils_specification_part1.pdf" },
+    { name: "Specification – Part 2", file: "assets/reports/ils_specification_part2.pdf" },
+    { name: "Simulation Answers – Part 1", file: "assets/reports/ils_answers_simulations_part1.pdf" },
+    { name: "Simulation Answers – Part 2", file: "assets/reports/ils_answers_simulations_part2.pdf" }
+  ]
+        
       },
       {
         id: 'cad',
@@ -598,6 +605,18 @@ void doorControl(){
     window.addEventListener('error',(e)=>{
       const t = e.target; if(t.tagName==='IMG') t.src='data:image/svg+xml;utf8,<svg xmlns="http://www.w3.org/2000/svg" width="600" height="400"><rect width="100%" height="100%" fill="%23121a22"/><text x="50%" y="50%" fill="%239aa4af" font-size="20" text-anchor="middle" dy=".3em">Image placeholder</text></svg>';
     },true);
+
+    // Add report buttons
+if (project.reports) {
+  project.reports.forEach(r => {
+    modalBody.innerHTML += `
+      <a class="btn" href="${r.file}" target="_blank" style="margin-top:10px; display:block;">
+        ${r.name}
+      </a>
+    `;
+  });
+}
+
 
     // init highlight for any inline code present on page
     document.addEventListener('DOMContentLoaded',()=>{document.querySelectorAll('pre code').forEach((el)=>hljs.highlightElement(el))});
