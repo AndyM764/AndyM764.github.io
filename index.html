@@ -19,6 +19,7 @@
     }
     *{box-sizing:border-box}
     body{margin:0;background:radial-gradient(ellipse at 10% 20%, rgba(124,58,237,0.06), transparent 10%), var(--bg); color:#e6eef6; -webkit-font-smoothing:antialiased}
+    html { scroll-behavior: smooth; }
     .wrap{max-width:var(--maxw);margin:36px auto;padding:20px}
     header.site{display:flex;align-items:center;gap:18px}
     header .brand{display:flex;flex-direction:column}
@@ -45,52 +46,44 @@
     .proj-card p{margin:0;color:var(--muted);font-size:13px}
 
     /* -----------------------------
-   FIX FOR MODAL CLOSE BUTTON
-   ----------------------------- */
-.modal .sheet .close {
-    float: none;                     /* remove float */
-    background: rgba(0,0,0,0.6);     /* semi-transparent background */
-    border: none;
-    color: #fff;                     /* bright color */
-    font-size: 24px;                 /* bigger */
-    cursor: pointer;
-    position: absolute;               /* top-right corner */
-    top: 12px;
-    right: 12px;
-    z-index: 9999;                   /* above image */
-    padding: 6px 10px;
-    border-radius: 6px;
-}
+       MODAL & CLOSE BUTTON
+    ----------------------------- */
+    .modal{position:fixed;inset:0;display:none;align-items:center;justify-content:center;padding:20px;z-index:60}
+    .modal.open{display:flex}
+    .modal .sheet{width:100%;max-width:920px;background:#071018;padding:22px;border-radius:12px;border:1px solid rgba(255,255,255,0.04);box-shadow:0 20px 60px rgba(2,6,23,0.7)}
+    .modal .sheet .close {
+        background: rgba(0,0,0,0.6); border: none; color: #fff; font-size: 24px; cursor: pointer; 
+        position: absolute; top: 12px; right: 12px; z-index: 9999; padding: 6px 10px; border-radius: 6px;
+    }
+    .modal .sheet .modal-body{display:grid;grid-template-columns:1fr 360px;gap:18px}
+    .modal img{width:100%;max-height:70vh;object-fit:contain;border-radius:8px}
+    pre{background:#07131a;padding:14px;border-radius:8px;border:1px solid rgba(255,255,255,0.02);overflow:auto}
+    .modal .sheet pre { max-height: 60vh; overflow: auto; }
 
-/* Limit image height inside modal */
-.modal img {
-    width: 100%;
-    max-height: 70vh;                /* prevents covering close button */
-    object-fit: contain;
-    border-radius: 8px;
-}
-
+    /* Modal report buttons */
+    .modal .sheet .btn {
+      display: block;
+      width: 100%;
+      text-align: center;
+      margin-top: 10px;
+      padding: 12px 0;
+      font-size: 14px;
+      border-radius: 8px;
+      background: linear-gradient(90deg, var(--accent), #4f46e5);
+      color: white;
+      text-decoration: none;
+      transition: transform 0.15s ease;
+    }
+    .modal .sheet .btn:hover {
+      transform: translateY(-3px);
+      background: linear-gradient(90deg, #6b21a8, #4338ca);
+    }
 
     .content-row{display:grid;grid-template-columns:1fr 340px;gap:20px;margin-top:22px}
     .about-card{line-height:1.6;color:var(--muted)}
     aside.card.right-panel{position:sticky;top:22px;height:fit-content}
-
     footer{margin:36px 0 80px;text-align:center;color:var(--muted);font-size:13px}
 
-    /* modal */
-    .modal{position:fixed;inset:0;display:none;align-items:center;justify-content:center;padding:20px;z-index:60}
-    .modal.open{display:flex}
-    .modal .sheet{width:100%;max-width:920px;background:#071018;padding:22px;border-radius:12px;border:1px solid rgba(255,255,255,0.04);box-shadow:0 20px 60px rgba(2,6,23,0.7)}
-    .modal .sheet .close{float:right;background:transparent;border:0;color:var(--muted);font-size:18px;cursor:pointer}
-    .modal .sheet .modal-body{display:grid;grid-template-columns:1fr 360px;gap:18px}
-    .modal img{width:100%;border-radius:8px}
-    pre{background:#07131a;padding:14px;border-radius:8px;border:1px solid rgba(255,255,255,0.02);overflow:auto}
-
-    /* ⭐ ADD THIS HERE — NOT inside @media ⭐ */
-    .modal .sheet pre {
-     max-height: 60vh;
-     overflow: auto;
-     }
     /* responsive */
     @media (max-width:880px){
       .content-row{grid-template-columns:1fr}
@@ -103,7 +96,6 @@
     .muted{color:var(--muted)}
     .btn{display:inline-block;padding:10px 14px;border-radius:10px;background:linear-gradient(90deg,var(--accent),#4f46e5);color:white;text-decoration:none}
     .meta{font-size:13px;color:var(--muted)}
-
   </style>
 </head>
 <body>
@@ -128,19 +120,14 @@
       <div class="left">
         <div class="card">
           <h2>Selected Projects</h2>
-          <p class="muted">Below are highlighted projects with write-ups, images and code snippets. Click any project to open detailed view.</p>
-
-          <div class="projects-grid" id="projects-grid">
-            <!-- Project cards inserted by JS -->
-          </div>
+          <p class="muted">Highlighted projects with write-ups, images, and code snippets. Click any project to open detailed view.</p>
+          <div class="projects-grid" id="projects-grid"></div>
         </div>
 
         <div class="card" style="margin-top:16px">
           <h3 style="margin-top:0">Public code & repos</h3>
-          <p class="muted">Link your project repositories here for recruiters to see full code. Example:</p>
-          <p class="meta">Github: <a href="https://github.com/andy-mannikum" style="color:#9ad1ff">github.com/andy-mannikum</a></p>
+          <p class="muted">Github: <a href="https://github.com/andy-mannikum" style="color:#9ad1ff">github.com/andy-mannikum</a></p>
         </div>
-
       </div>
 
       <div class="right">
@@ -154,10 +141,9 @@
             <div class="chip">Control Systems</div>
             <div class="chip">Signal Processing</div>
           </div>
-
           <hr style="margin:14px 0;border-color:rgba(255,255,255,0.03)">
           <h4>Contact</h4>
-          <p class="muted">Email: <a href="mailto:andymannikum76@gmail.com">andymannikum76@.com</a></p>
+          <p class="muted">Email: <a href="mailto:andymannikum76@gmail.com">andymannikum76@gmail.com</a></p>
         </aside>
       </div>
     </section>
@@ -166,17 +152,16 @@
       <main>
         <section id="about" class="card about-card">
           <h2>About</h2>
-          <p class="muted">I am a mechatronics engineering student with hands-on experience in electronics, embedded systems and numerical simulation. My work includes sensor-based devices, control algorithms and CAD-based mechanical design. The projects below include full write-ups, photos, and code snippets — click to explore each in detail.</p>
+          <p class="muted">I am a mechatronics engineering student with hands-on experience in electronics, embedded systems, and numerical simulation. Projects include sensor-based devices, control algorithms, and CAD-based mechanical design.</p>
 
           <h3 style="margin-top:18px">Education & Tools</h3>
-          <p class="muted">BEng Mechatronics (in progress) — Familiar with MATLAB, SolidWorks, Arduino, Python, and Git.</p>
+          <p class="muted">BEng Mechatronics (in progress) — MATLAB, SolidWorks, Arduino, Python, and Git.</p>
         </section>
 
         <section id="projects" class="card" style="margin-top:16px">
           <h2 style="margin-top:0">All Projects</h2>
-          <p class="muted">Scroll up to the project cards, or open any detail modal for more information and code.</p>
+          <p class="muted">Scroll up to project cards, or open any detail modal for more information and code.</p>
         </section>
-
       </main>
 
       <aside>
@@ -185,9 +170,7 @@
           <p class="muted">Aspiring mechatronics engineer — looking for internships/placements in robotics and control system design.</p>
           <p class="muted">Languages: English</p>
         </div>
-
         <div style="height:16px"></div>
-
         <div class="card">
           <h3 style="margin-top:0">Availability</h3>
           <p class="muted">Open to internship opportunities and collaboration on simulation or embedded projects.</p>
@@ -203,46 +186,42 @@
   <!-- Project modal -->
   <div id="modal" class="modal" role="dialog" aria-hidden="true">
     <div class="sheet" role="document">
-      <button class="close" onclick="closeModal()">✕</button>
-      <div id="modalContent" class="modal-body">
-        <!-- content injected by JS -->
-      </div>
+      <button class="close" onclick="closeModal()" aria-label="Close modal">✕</button>
+      <div id="modalContent" class="modal-body"></div>
     </div>
   </div>
 
   <script>
-    // project data - edit these entries to customize each project's text, images and code
     const projects = [
       {
         id: 'hrm',
         title: 'Heart Rate Monitor',
         short: 'Sensor-based heart rate monitor with microcontroller data logging',
-        images: ['heart_rate_monitor.jpg'], // upload these images to your repo
+        images: ['heart_rate_monitor.jpg'],
         report: { name: "Heart Rate Report", url: "HeartRateMonitor_Report.pdf" },
-        writeup: `Designed and implemented a photoplethysmography (PPG) heart rate monitor. \n\nFeatures: signal filtering, peak detection, display and data logging to serial output. Implemented on an Arduino-based MCU with a sampling routine and post-processing in Python.`,
-        code: `// Arduino - simple sampling loop\nconst int sensorPin = A0;\nvoid setup(){ Serial.begin(115200); }\nvoid loop(){ int v = analogRead(sensorPin); Serial.println(v); delay(10); }`
+        writeup: `Designed and implemented a photoplethysmography (PPG) heart rate monitor.\n\nFeatures: signal filtering, peak detection, display, and data logging to serial output. Implemented on Arduino with post-processing in Python.`,
+        code: `const int sensorPin = A0;\nvoid setup(){ Serial.begin(115200); }\nvoid loop(){ int v = analogRead(sensorPin); Serial.println(v); delay(10); }`
       },
       {
         id: 'ils',
         title: 'ILS Lateral Beam Guidance Simulation',
         short: 'MATLAB/Simulink simulation of lateral guidance for aircraft approaches',
         images: ['ils_simulation.jpeg'],
-        writeup: `This project simulates an Instrument Landing System (ILS) Lateral Beam Guidance using MATLAB and Simulink. The model evaluates aircraft lateral deviation, beam capture behavior, glide path tracking, and response under wind disturbances. The system uses proportional guidance logic to correct course deviations and produce smooth, realistic approach behavior.`,
-        code: ``,
+        writeup: `Simulates an Instrument Landing System (ILS) Lateral Beam Guidance using MATLAB and Simulink. Evaluates lateral deviation, beam capture, glide path tracking, and wind disturbance response.`,
         reports: [
-    { name: "Specification – Part 1", file: "assets/reports/ils_specification_part1.pdf" },
-    { name: "Specification – Part 2", file: "assets/reports/ils_specification_part2.pdf" },
-    { name: "Simulation Answers – Part 1", file: "assets/reports/ils_answers_simulations_part1.pdf" },
-    { name: "Simulation Answers – Part 2", file: "assets/reports/ils_answers_simulations_part2.pdf" }
-  ]
-        
+          { name: "Specification – Part 1", file: "assets/reports/ils_specification_part1.pdf" },
+          { name: "Specification – Part 2", file: "assets/reports/ils_specification_part2.pdf" },
+          { name: "Simulation Answers – Part 1", file: "assets/reports/ils_answers_simulations_part1.pdf" },
+          { name: "Simulation Answers – Part 2", file: "assets/reports/ils_answers_simulations_part2.pdf" }
+        ],
+        code: ``
       },
       {
         id: 'cad',
         title: '3D Bike Design (CAD)',
         short: 'Full 3D CAD assembly with parts and BOM',
         images: ['3d_bike.jpg'],
-        writeup: `Designed a bicycle assembly in SolidWorks with parametrized frame geometry, bearings, and mounting points. Exported exploded views and generated parts list for manufacturing.`,
+        writeup: `Designed a bicycle assembly in SolidWorks with parametrized frame geometry, bearings, and mounting points. Generated parts list for manufacturing.`,
         code: ``
       },
       {
@@ -250,317 +229,11 @@
         title: 'Lift (3-floor Elevator)',
         short: 'Control system and hardware for a 3-floor lift prototype',
         images: ['lift_design.jpeg'],
-        writeup: `Built a scale lift with floor detection, motor control, and safety interlocks. Implemented a state machine for floor sequencing and emergency stop logic.`,
-        code: `// Arduino code for controlling the lift
-        /*******************************
- * Skeleton for Lift Program   *
- * 05-AUG-22                  *
- *******************************/
- //https://arduino.stackexchange.com/questions/37684/can-i-make-multiple-loop-functions-with-arduino-uno
-  
-/*************
- * CONSTANTS *
- *************/
-//Actions
-//-------
-#define actionDoNothing 0
-//
-//Actions specific to Lift Car:-
-#define actionStopAll   1 //stop Hoist Motor only
-#define actionAccelUp   2
-#define actionMoveUp    3
-#define actionDecelUp   4
-#define actionAccelDn   5
-#define actionMovedn    6
-#define actionDecelDn   7
-
-// Actions specific to door:-
-#define actionOpenDoor  11
-#define actionCloseDoor 12
-#define actionStopDoor  13
-
-//Door States:-
-#define unknown   0
-#define closed    1
-#define opening   2
-#define opened    3
-#define closing   4
-
-//Duty Cycle Values for Motor speed control
-#define slowDuty  0xE1 
-#define fastDuty  0xFA
-#define stopDuty  0
-
-#define timePeriod1 1000 //ms
-#define timePeriod2 500 //ms
-
-#define up    1
-#define down  2
-
-#define atFloor1              0x01
-#define slightlyAboveFloor1   0x02
-#define slightlyBelowFloor2   0x04
-#define atFloor2              0x08
-#define slightlyAboveFloor2   0x10
-#define slightlyBelowFloor3   0x20
-#define atFloor3              0x40
-
-#define oneTrig               B11111101   //Mask to cancel triggers at floor 1 
-#define twoTrigs              B11101011   //Mask to cancel triggers at floor 2
-#define threeTrig             B11011111   //Mask to cancel triggers at floor 3
-
-#define doorOpenTime          2000  //time in milli-seconds that the door will be kept open for.
-
-
-/*************
- * VARIABLES *
- *************/
-// A Variable name is associated with each DIGITAL pin:-
-int pSrClk = 13; // shift register data clocked on rising edge
-int pSrDat = 12; // shift register data
-int pSrLtch = 11; // shift register data latched on rising edge
-int pSrRst = 10; // asynchronous clear shift register, Active Low
-uint8_t pCarPosB = 9;
-uint8_t pCarPosA = 8;
-uint8_t pHoistDir = 7;
-uint8_t pDoorPwm = 6;  //controls Door Motor speed ; values can be 0 (off)..255 (maximum)
-uint8_t pHoistPwm = 5; //controls Hoist(Car) Motor speed ; values can be 0 (off)..255 (maximum)
-uint8_t pDoorDir = 4;
-// Pin D3 not used
-uint8_t pCarPosC = 2;
-int pFloorLvlDisp1 = 14; 
-int pFloorLvlDisp0 = 15;
-
-// A Variable name is associated with each ANALOGUE pin:-
-// pin A5 not used
- uint8_t pDoorClSens = 4;
- uint8_t pDoorOpSens = 3;
- uint8_t pLandingCall = 2; 
- uint8_t pLiftCarCall = 1;
- uint8_t pDoorOpCl = 0;
-
-// other variables added by JG:-
- short ledWord;
- short nextCarDirection;
- uint8_t calledFromCurrentLanding;
- uint8_t state;
- uint8_t carAtFloor; //most recent floor that the lift car has been at (whether stopped or moving)
- uint8_t demandFloor3 = 0;
- uint8_t demandFloor2 = 0;
- uint8_t demandFloor1 = 0;
- uint8_t triggers;
- uint8_t topBut;
- uint8_t bottomBut;
- int lastLift;
- int liftFloorPB;
- int liftDoorPB;
- uint8_t action = 0; // 0 = Do Nothing
- uint8_t doorState;
- uint8_t lastDoorState;
-
- uint8_t positionReg;
- uint8_t floorReg;
- uint8_t approachReg;
- uint8_t demandReg = 0x00;
-
- uint8_t lastState;
- uint8_t nextState;
- uint8_t carDuty;
- uint8_t doorDuty;
-
- uint8_t openDoorRequestPending;
-
- float buttonvoltage;
-
-
- int tempInt = 0; //general purpose variable
- int doorClosedSensor = 0;
- int doorOpenSensor = 0;
- int landingCall = 0;
-
- uint8_t carPos = 0;
- uint8_t carPosA = 0;
- uint8_t carPosB = 0;
- uint8_t carPosC = 0;
-
- word i;
-
-//Set "serialDebug" to "true" to allow the Serial Monitor to be used (can send messages back
-//from inside the program e.g. show changing analog inputs and floor level.
-int serialDebug = true;
-
- 
-
- unsigned long oldMillis;
- unsigned long newMillis;
-
-
-/********************
- * "setup" function *
- ********************/
-void setup() {
-  // put your setup code here, to run once:
-  //
-  // the setup function runs once when you press reset or power the board
-  
-  //Set up DIGITAL pin directions:-
-  pinMode(pSrClk, OUTPUT);
-  pinMode(pSrDat, OUTPUT);
-  pinMode(pSrLtch, OUTPUT);
-  pinMode(pSrRst, OUTPUT);
-  pinMode(pHoistDir, OUTPUT);
-  pinMode(pDoorPwm, OUTPUT);
-  pinMode(pHoistPwm, OUTPUT);
-  pinMode(pDoorDir, OUTPUT);
-  //D3 not used
-  pinMode(pCarPosA, INPUT);
-  pinMode(pCarPosB, INPUT);
-  pinMode(pCarPosC, INPUT);
-  pinMode(pFloorLvlDisp1, OUTPUT);
-  pinMode(pFloorLvlDisp0, OUTPUT);
-  pinMode(pLandingCall, INPUT);
-
-  digitalWrite(15, LOW);
-  digitalWrite(14, LOW);
-
-  
-
-  
-  
-  
-  if (serialDebug == true)
-  {
-    Serial.begin(9600);
-  }
-  
-  if (action == 1)
-  {
-    //allStop();
-  }
-  
-  if (state == 0)
-  {
-    //executeState1();
-  }
-  return;
-}
-
-
-/*******************
- * "loop" function *
- *******************/
-void loop() {
-  
-//button inputs
-buttonCheck();
-
-carPosA = digitalRead(pCarPosA);
-carPosB = digitalRead(pCarPosB);
-carPosC = digitalRead(pCarPosC);
-carPos = carPosA + carPosB + carPosC;
-positionReg = carPos & 00000111;
-
-//Serial.print(positionReg);
-
-if(carPosA == LOW && carPosB == LOW && carPosC == HIGH)
-{
-  digitalWrite(14, HIGH);
-  digitalWrite(15, LOW);
-}
-
-  return;
-}
-
-/***********************
- * TOP-LEVEL FUNCTIONS *
- ***********************/
-void exampleFunction1() {
-  // insert code here
-  return;
-}
-
-
-/***********************
- * INDICATOR FUNCTIONS *
- ***********************/
-void LEDControl(){
-  digitalWrite(14, LOW);
-  digitalWrite(15, LOW);
-  delay(500);
-  digitalWrite(15, HIGH);
-  delay(6000);
-  digitalWrite(14, HIGH);
-  digitalWrite(15, LOW);
-  delay(6000);
-  digitalWrite(14, HIGH);
-  digitalWrite(15, HIGH);
-  
-}
-
- 
-
-/*******************
- * INPUT FUNCTIONS *
- *******************/
-// This group of Functions reads the state of each input (switches, buttons, sensors).
-
-void buttonCheck(){
-buttonvoltage = analogRead(pLandingCall);
-
-//Serial.print(buttonvoltage);
-
-if(buttonvoltage >= 630 && buttonvoltage <= 650)
-{
-  //floor 3
-  Serial.print("floor 3 ");
-  hoistControl();
-  LEDControl();
-}else if(buttonvoltage >= 286 && buttonvoltage <= 306){
-  //floor 2 top
-  Serial.print("floor 2 top ");
-}else if(buttonvoltage >= 462 && buttonvoltage <= 482){
-  //floor 2 bottom
-  Serial.print("floor 2 bottom ");
-}else if(buttonvoltage >= 157 && buttonvoltage <= 177){
-  //floor 1
-  Serial.print("floor 1 ");
-  doorControl();
-}else{
-  //buttons off
-  Serial.print("no buttons ");
-}
-}
-
-
-/*************************
- * HOIST MOTOR FUNCTIONS *
- *************************/
-
-void hoistControl(){
-  analogWrite(pHoistPwm, 150);
-
-  digitalWrite(pHoistDir, LOW);
-  delay(12000);
-  analogWrite(pHoistPwm, 0);
-}
-
-
-/************************
- * DOOR MOTOR FUNCTIONS *
- ************************/
-
-void doorControl(){
-  analogWrite(pDoorPwm, 100);
-
-  digitalWrite(pDoorDir, LOW);
-  delay(4000);
-  analogWrite(pDoorPwm, 0);
-}
-}`
+        writeup: `Built a scale lift with floor detection, motor control, and safety interlocks. Implemented state machine for floor sequencing and emergency stop logic.`,
+        code: `// Arduino lift control code snippet...`
       }
     ];
 
-    // build project grid
     const grid = document.getElementById('projects-grid');
     projects.forEach(p=>{
       const card = document.createElement('div'); card.className='proj-card card';
@@ -576,14 +249,24 @@ void doorControl(){
       const project = projects.find(x=>x.id===id);
       const modal = document.getElementById('modal');
       const content = document.getElementById('modalContent');
+
+      // Build report buttons if project.reports exists
+      let reportsHtml = '';
+      if (project.reports) {
+        reportsHtml = project.reports.map(r => 
+          `<a class="btn" href="${r.file}" target="_blank">${r.name}</a>`
+        ).join('');
+      } else if(project.report) {
+        reportsHtml = `<a class="btn" href="${project.report.url}" target="_blank">${project.report.name}</a>`;
+      }
+
       content.innerHTML = `
         <div>
           <h2 style="margin-top:0">${project.title}</h2>
           <p class="muted">${project.short}</p>
           <p style="white-space:pre-wrap;color:var(--muted)">${project.writeup}</p>
-          ${project.code? `<h4>Code (example)</h4><pre><code class='language-javascript'>${escapeHtml(project.code)}</code></pre>`: ''}
-
-          ${project.report ? `<h4>Report</h4><a href="${project.report.url}" target="_blank">${project.report.name}</a>` : ''}
+          ${project.code ? `<h4>Code (example)</h4><pre><code class='language-javascript'>${escapeHtml(project.code)}</code></pre>` : ''}
+          ${reportsHtml}
         </div>
         <div>
           ${project.images.map(img=>`<img src="${img}" alt="${project.title}">`).join('')}
@@ -591,38 +274,21 @@ void doorControl(){
         </div>
       `;
       modal.classList.add('open');
-      // highlight code
-      document.querySelectorAll('pre code').forEach((el)=>{hljs.highlightElement(el)});
+      document.querySelectorAll('pre code').forEach(el=>hljs.highlightElement(el));
     }
 
     function closeModal(){ document.getElementById('modal').classList.remove('open'); }
     function escapeHtml(s){ return s.replaceAll('&','&amp;').replaceAll('<','&lt;').replaceAll('>','&gt;'); }
 
-    // Download CV placeholder function (replace with real file link if you upload cv.pdf)
-    function downloadPDF(){ window.open('cv.pdf','_blank'); }
-
-    // small helper: if images missing, show placeholders
     window.addEventListener('error',(e)=>{
       const t = e.target; if(t.tagName==='IMG') t.src='data:image/svg+xml;utf8,<svg xmlns="http://www.w3.org/2000/svg" width="600" height="400"><rect width="100%" height="100%" fill="%23121a22"/><text x="50%" y="50%" fill="%239aa4af" font-size="20" text-anchor="middle" dy=".3em">Image placeholder</text></svg>';
     },true);
 
-    // Add report buttons
-if (project.reports) {
-  project.reports.forEach(r => {
-    modalBody.innerHTML += `
-      <a class="btn" href="${r.file}" target="_blank" style="margin-top:10px; display:block;">
-        ${r.name}
-      </a>
-    `;
-  });
-}
-
-
-    // init highlight for any inline code present on page
     document.addEventListener('DOMContentLoaded',()=>{document.querySelectorAll('pre code').forEach((el)=>hljs.highlightElement(el))});
   </script>
 </body>
 </html>
+
 
       
     
