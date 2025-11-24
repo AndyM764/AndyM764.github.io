@@ -213,6 +213,7 @@
         title: 'Heart Rate Monitor',
         short: 'Sensor-based heart rate monitor with microcontroller data logging',
         images: ['heart_rate_monitor.jpg'], // upload these images to your repo
+        report: { name: "Heart Rate Report", url: "HeartRateMonitor_Report.pdf" },
         writeup: `Designed and implemented a photoplethysmography (PPG) heart rate monitor. \n\nFeatures: signal filtering, peak detection, display and data logging to serial output. Implemented on an Arduino-based MCU with a sampling routine and post-processing in Python.`,
         code: `// Arduino - simple sampling loop\nconst int sensorPin = A0;\nvoid setup(){ Serial.begin(115200); }\nvoid loop(){ int v = analogRead(sensorPin); Serial.println(v); delay(10); }`
       },
@@ -569,6 +570,8 @@ void doorControl(){
           <p class="muted">${project.short}</p>
           <p style="white-space:pre-wrap;color:var(--muted)">${project.writeup}</p>
           ${project.code? `<h4>Code (example)</h4><pre><code class='language-javascript'>${escapeHtml(project.code)}</code></pre>`: ''}
+
+          ${project.report ? `<h4>Report</h4><a href="${project.report.url}" target="_blank">${project.report.name}</a>` : ''}
         </div>
         <div>
           ${project.images.map(img=>`<img src="${img}" alt="${project.title}">`).join('')}
