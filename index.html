@@ -236,7 +236,8 @@
         short: 'Control system and hardware for a 3-floor lift prototype',
         images: ['lift_design.jpeg'],
         writeup: `Built a scale lift with floor detection, motor control, and safety interlocks. Implemented state machine for floor sequencing and emergency stop logic.`,
-        code: `// Arduino lift control code snippet...`
+        code: `// Arduino code for controlling the lift
+// ... very long code here ...`,
       }
     ];
 
@@ -256,6 +257,16 @@
       const modal = document.getElementById('modal');
       const content = document.getElementById('modalContent');
 
+      .modal .sheet pre.code-box {
+  max-height: 60vh;       /* Limits height to 60% of viewport */
+  overflow: auto;         /* Adds scrollbar for long code */
+  background: #07131a;
+  padding: 14px;
+  border-radius: 8px;
+  border: 1px solid rgba(255,255,255,0.02);
+}
+
+
       // Build report buttons if project.reports exists
       let reportsHtml = '';
       if (project.reports) {
@@ -271,7 +282,7 @@
           <h2 style="margin-top:0">${project.title}</h2>
           <p class="muted">${project.short}</p>
           <p style="white-space:pre-wrap;color:var(--muted)">${project.writeup}</p>
-          ${project.code ? `<h4>Code (example)</h4><pre><code class='language-javascript'>${escapeHtml(project.code)}</code></pre>` : ''}
+          ${project.code ? `<h4>Code (example)</h4><pre class="code-box"><code class='language-c'>${escapeHtml(project.code)}</code></pre>` : ''}
           ${reportsHtml}
         </div>
         <div>
