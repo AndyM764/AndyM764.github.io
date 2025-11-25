@@ -652,10 +652,11 @@ void doorControl(){
         <div>
           ${project.images.map(img=>`<img src="${img}" alt="${project.title}">`).join('')}
           ${project.videos ? project.videos.map(v => `
-  <video controls style="width:100%; margin-top:10px; border-radius:8px;">
-    <source src="${v}" type="video/MP4">
-    Your browser does not support the video tag.
-  </video>
+  <video controls style="width:100%; max-height:300px; margin-top:10px; border-radius:8px;">
+  <source src="${v}" type="video/mp4">
+  Your browser does not support the video tag.
+</video>
+
 `).join('') : ''}
           <p class="meta" style="margin-top:10px">Images: upload the listed filenames to the repository root.</p>
         </div>
