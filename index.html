@@ -50,7 +50,7 @@
     ----------------------------- */
     .modal{position:fixed;inset:0;display:none;align-items:center;justify-content:center;padding:20px;z-index:60}
     .modal.open{display:flex}
-    .modal .sheet{width:100%;max-width:920px;background:#071018;padding:22px;border-radius:12px;border:1px solid rgba(255,255,255,0.04);box-shadow:0 20px 60px rgba(2,6,23,0.7)}
+    .modal .sheet{width:100%;max-width:920px;background:#071018;padding:22px;border-radius:12px;border:1px solid rgba(255,255,255,0.04);box-shadow:0 20px 60px rgba(2,6,23,0.7);position:relative}
     .modal .sheet .close {
         background: rgba(0,0,0,0.6); border: none; color: #fff; font-size: 24px; cursor: pointer; 
         position: absolute; top: 12px; right: 12px; z-index: 9999; padding: 6px 10px; border-radius: 6px;
@@ -58,7 +58,7 @@
     .modal .sheet .modal-body{display:grid;grid-template-columns:1fr 360px;gap:18px}
     .modal img{width:100%;max-height:70vh;object-fit:contain;border-radius:8px}
     pre{background:#07131a;padding:14px;border-radius:8px;border:1px solid rgba(255,255,255,0.02);overflow:auto}
-    .modal .sheet pre { max-height: 60vh; overflow: auto; }
+    .modal .sheet pre.code-box { max-height: 60vh; overflow: auto; background: #07131a; padding: 14px; border-radius: 8px; border: 1px solid rgba(255,255,255,0.02); }
 
     /* Modal report buttons */
     .modal .sheet .btn {
@@ -126,13 +126,13 @@
 
         <div class="card" style="margin-top:16px">
           <h3 style="margin-top:0">Public code & repos</h3>
-  <p class="muted">Explore all my public repositories and projects on GitHub:</p>
-  <p class="meta">
-    <a href="https://AndyM764.github.io" target="_blank" style="color:#9ad1ff">
-      AndyM764.github.io
-    </a>
-  </p>
-</div>
+          <p class="muted">Explore all my public repositories and projects on GitHub:</p>
+          <p class="meta">
+            <a href="https://AndyM764.github.io" target="_blank" style="color:#9ad1ff">
+              AndyM764.github.io
+            </a>
+          </p>
+        </div>
       </div>
 
       <div class="right">
@@ -227,8 +227,7 @@
         images: ['3d_bike.jpeg'],
         writeup: `Designed a bicycle assembly in SolidWorks with parametrized frame geometry, bearings, and mounting points. Generated parts list for manufacturing.`,
         code: ``,
-        reports: { name: "3D Bike CAD Report", url: "3d_bike_report.pdf" } 
-  
+        report: { name: "3D Bike CAD Report", url: "3d_bike_report.pdf" }
       },
       {
         id: 'lift',
@@ -236,8 +235,7 @@
         short: 'Control system and hardware for a 3-floor lift prototype',
         images: ['lift_design.jpeg'],
         writeup: `Built a scale lift with floor detection, motor control, and safety interlocks. Implemented state machine for floor sequencing and emergency stop logic.`,
-        code: `// Arduino code for controlling the lift
-// /*******************************
+        code: `// /*******************************
  * Skeleton for Lift Program   *
  * 05-AUG-22                  *
  *******************************/
@@ -542,6 +540,9 @@ void doorControl(){
   analogWrite(pDoorPwm, 0);
 }
 `,
+        reports: [
+          { name: "Lift Project Report", file: "Lift_Report.pdf" }
+        ]
       }
     ];
 
@@ -561,17 +562,6 @@ void doorControl(){
       const modal = document.getElementById('modal');
       const content = document.getElementById('modalContent');
 
-      .modal .sheet pre.code-box {
-  max-height: 60vh;       /* Limits height to 60% of viewport */
-  overflow: auto;         /* Adds scrollbar for long code */
-  background: #07131a;
-  padding: 14px;
-  border-radius: 8px;
-  border: 1px solid rgba(255,255,255,0.02);
-}
-
-
-      // Build report buttons if project.reports exists
       let reportsHtml = '';
       if (project.reports) {
         reportsHtml = project.reports.map(r => 
@@ -609,6 +599,7 @@ void doorControl(){
   </script>
 </body>
 </html>
+
 
 
       
