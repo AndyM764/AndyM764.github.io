@@ -566,13 +566,18 @@ void doorControl(){
       const content = document.getElementById('modalContent');
 
       let reportsHtml = '';
-      if (project.reports) {
-        reportsHtml = project.reports.map(r => 
-          `<a class="btn" href="${r.file}" target="_blank">${r.name}</a>`
-        ).join('');
-      } else if(project.report) {
-        reportsHtml = `<a class="btn" href="${project.report.url}" target="_blank">${project.report.name}</a>`;
-      }
+     if (report.file.endsWith(".pdf")) {
+  modalContent.innerHTML = `
+    <h2>${project.title}</h2>
+    <iframe 
+      src="${report.file}" 
+      width="100%" 
+      height="600px" 
+      style="border: none;">
+    </iframe>
+  `;
+}
+
 
       content.innerHTML = `
         <div>
