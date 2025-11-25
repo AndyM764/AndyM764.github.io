@@ -262,13 +262,14 @@
       const content = document.getElementById('modalContent');
 
       let reportsHtml = '';
-      if (project.reports) {
-        reportsHtml = project.reports.map(r =>
+       if (project.reports) {
+        reportsHtml = project.reports.map(r => 
           `<a class="btn" href="${r.file}" target="_blank">${r.name}</a>`
         ).join('');
       } else if(project.report) {
-  reportsHtml = `<a class="btn" href="assets/reports/${project.report.url}" download>${project.report.name}</a>`;
+        reportsHtml = `<a class="btn" href="${project.report.url}" target="_blank">${project.report.name}</a>`;
 }
+
 
       content.innerHTML = `
         <div>
