@@ -237,7 +237,311 @@
         images: ['lift_design.jpeg'],
         writeup: `Built a scale lift with floor detection, motor control, and safety interlocks. Implemented state machine for floor sequencing and emergency stop logic.`,
         code: `// Arduino code for controlling the lift
-// ... very long code here ...`,
+// /*******************************
+ * Skeleton for Lift Program   *
+ * 05-AUG-22                  *
+ *******************************/
+ //https://arduino.stackexchange.com/questions/37684/can-i-make-multiple-loop-functions-with-arduino-uno
+  
+/*************
+ * CONSTANTS *
+ *************/
+//Actions
+//-------
+#define actionDoNothing 0
+//
+//Actions specific to Lift Car:-
+#define actionStopAll   1 //stop Hoist Motor only
+#define actionAccelUp   2
+#define actionMoveUp    3
+#define actionDecelUp   4
+#define actionAccelDn   5
+#define actionMovedn    6
+#define actionDecelDn   7
+
+// Actions specific to door:-
+#define actionOpenDoor  11
+#define actionCloseDoor 12
+#define actionStopDoor  13
+
+//Door States:-
+#define unknown   0
+#define closed    1
+#define opening   2
+#define opened    3
+#define closing   4
+
+//Duty Cycle Values for Motor speed control
+#define slowDuty  0xE1 
+#define fastDuty  0xFA
+#define stopDuty  0
+
+#define timePeriod1 1000 //ms
+#define timePeriod2 500 //ms
+
+#define up    1
+#define down  2
+
+#define atFloor1              0x01
+#define slightlyAboveFloor1   0x02
+#define slightlyBelowFloor2   0x04
+#define atFloor2              0x08
+#define slightlyAboveFloor2   0x10
+#define slightlyBelowFloor3   0x20
+#define atFloor3              0x40
+
+#define oneTrig               B11111101   //Mask to cancel triggers at floor 1 
+#define twoTrigs              B11101011   //Mask to cancel triggers at floor 2
+#define threeTrig             B11011111   //Mask to cancel triggers at floor 3
+
+#define doorOpenTime          2000  //time in milli-seconds that the door will be kept open for.
+
+
+/*************
+ * VARIABLES *
+ *************/
+// A Variable name is associated with each DIGITAL pin:-
+int pSrClk = 13; // shift register data clocked on rising edge
+int pSrDat = 12; // shift register data
+int pSrLtch = 11; // shift register data latched on rising edge
+int pSrRst = 10; // asynchronous clear shift register, Active Low
+uint8_t pCarPosB = 9;
+uint8_t pCarPosA = 8;
+uint8_t pHoistDir = 7;
+uint8_t pDoorPwm = 6;  //controls Door Motor speed ; values can be 0 (off)..255 (maximum)
+uint8_t pHoistPwm = 5; //controls Hoist(Car) Motor speed ; values can be 0 (off)..255 (maximum)
+uint8_t pDoorDir = 4;
+// Pin D3 not used
+uint8_t pCarPosC = 2;
+int pFloorLvlDisp1 = 14; 
+int pFloorLvlDisp0 = 15;
+
+// A Variable name is associated with each ANALOGUE pin:-
+// pin A5 not used
+ uint8_t pDoorClSens = 4;
+ uint8_t pDoorOpSens = 3;
+ uint8_t pLandingCall = 2; 
+ uint8_t pLiftCarCall = 1;
+ uint8_t pDoorOpCl = 0;
+
+// other variables added by JG:-
+ short ledWord;
+ short nextCarDirection;
+ uint8_t calledFromCurrentLanding;
+ uint8_t state;
+ uint8_t carAtFloor; //most recent floor that the lift car has been at (whether stopped or moving)
+ uint8_t demandFloor3 = 0;
+ uint8_t demandFloor2 = 0;
+ uint8_t demandFloor1 = 0;
+ uint8_t triggers;
+ uint8_t topBut;
+ uint8_t bottomBut;
+ int lastLift;
+ int liftFloorPB;
+ int liftDoorPB;
+ uint8_t action = 0; // 0 = Do Nothing
+ uint8_t doorState;
+ uint8_t lastDoorState;
+
+ uint8_t positionReg;
+ uint8_t floorReg;
+ uint8_t approachReg;
+ uint8_t demandReg = 0x00;
+
+ uint8_t lastState;
+ uint8_t nextState;
+ uint8_t carDuty;
+ uint8_t doorDuty;
+
+ uint8_t openDoorRequestPending;
+
+ float buttonvoltage;
+
+
+ int tempInt = 0; //general purpose variable
+ int doorClosedSensor = 0;
+ int doorOpenSensor = 0;
+ int landingCall = 0;
+
+ uint8_t carPos = 0;
+ uint8_t carPosA = 0;
+ uint8_t carPosB = 0;
+ uint8_t carPosC = 0;
+
+ word i;
+
+//Set "serialDebug" to "true" to allow the Serial Monitor to be used (can send messages back
+//from inside the program e.g. show changing analog inputs and floor level.
+int serialDebug = true;
+
+ 
+
+ unsigned long oldMillis;
+ unsigned long newMillis;
+
+
+/********************
+ * "setup" function *
+ ********************/
+void setup() {
+  // put your setup code here, to run once:
+  //
+  // the setup function runs once when you press reset or power the board
+  
+  //Set up DIGITAL pin directions:-
+  pinMode(pSrClk, OUTPUT);
+  pinMode(pSrDat, OUTPUT);
+  pinMode(pSrLtch, OUTPUT);
+  pinMode(pSrRst, OUTPUT);
+  pinMode(pHoistDir, OUTPUT);
+  pinMode(pDoorPwm, OUTPUT);
+  pinMode(pHoistPwm, OUTPUT);
+  pinMode(pDoorDir, OUTPUT);
+  //D3 not used
+  pinMode(pCarPosA, INPUT);
+  pinMode(pCarPosB, INPUT);
+  pinMode(pCarPosC, INPUT);
+  pinMode(pFloorLvlDisp1, OUTPUT);
+  pinMode(pFloorLvlDisp0, OUTPUT);
+  pinMode(pLandingCall, INPUT);
+
+  digitalWrite(15, LOW);
+  digitalWrite(14, LOW);
+
+  
+
+  
+  
+  
+  if (serialDebug == true)
+  {
+    Serial.begin(9600);
+  }
+  
+  if (action == 1)
+  {
+    //allStop();
+  }
+  
+  if (state == 0)
+  {
+    //executeState1();
+  }
+  return;
+}
+
+
+/*******************
+ * "loop" function *
+ *******************/
+void loop() {
+  
+//button inputs
+buttonCheck();
+
+carPosA = digitalRead(pCarPosA);
+carPosB = digitalRead(pCarPosB);
+carPosC = digitalRead(pCarPosC);
+carPos = carPosA + carPosB + carPosC;
+positionReg = carPos & 00000111;
+
+//Serial.print(positionReg);
+
+if(carPosA == LOW && carPosB == LOW && carPosC == HIGH)
+{
+  digitalWrite(14, HIGH);
+  digitalWrite(15, LOW);
+}
+
+  return;
+}
+
+/***********************
+ * TOP-LEVEL FUNCTIONS *
+ ***********************/
+void exampleFunction1() {
+  // insert code here
+  return;
+}
+
+
+/***********************
+ * INDICATOR FUNCTIONS *
+ ***********************/
+void LEDControl(){
+  digitalWrite(14, LOW);
+  digitalWrite(15, LOW);
+  delay(500);
+  digitalWrite(15, HIGH);
+  delay(6000);
+  digitalWrite(14, HIGH);
+  digitalWrite(15, LOW);
+  delay(6000);
+  digitalWrite(14, HIGH);
+  digitalWrite(15, HIGH);
+  
+}
+
+ 
+
+/*******************
+ * INPUT FUNCTIONS *
+ *******************/
+// This group of Functions reads the state of each input (switches, buttons, sensors).
+
+void buttonCheck(){
+buttonvoltage = analogRead(pLandingCall);
+
+//Serial.print(buttonvoltage);
+
+if(buttonvoltage >= 630 && buttonvoltage <= 650)
+{
+  //floor 3
+  Serial.print("floor 3 ");
+  hoistControl();
+  LEDControl();
+}else if(buttonvoltage >= 286 && buttonvoltage <= 306){
+  //floor 2 top
+  Serial.print("floor 2 top ");
+}else if(buttonvoltage >= 462 && buttonvoltage <= 482){
+  //floor 2 bottom
+  Serial.print("floor 2 bottom ");
+}else if(buttonvoltage >= 157 && buttonvoltage <= 177){
+  //floor 1
+  Serial.print("floor 1 ");
+  doorControl();
+}else{
+  //buttons off
+  Serial.print("no buttons ");
+}
+}
+
+
+/*************************
+ * HOIST MOTOR FUNCTIONS *
+ *************************/
+
+void hoistControl(){
+  analogWrite(pHoistPwm, 150);
+
+  digitalWrite(pHoistDir, LOW);
+  delay(12000);
+  analogWrite(pHoistPwm, 0);
+}
+
+
+/************************
+ * DOOR MOTOR FUNCTIONS *
+ ************************/
+
+void doorControl(){
+  analogWrite(pDoorPwm, 100);
+
+  digitalWrite(pDoorDir, LOW);
+  delay(4000);
+  analogWrite(pDoorPwm, 0);
+}
+`,
       }
     ];
 
