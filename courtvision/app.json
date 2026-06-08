@@ -1,0 +1,41 @@
+{
+  "expo": {
+    "name": "CourtVision",
+    "slug": "courtvision",
+    "version": "1.0.0",
+    "orientation": "portrait",
+    "userInterfaceStyle": "light",
+    "ios": {
+      "supportsTablet": true,
+      "infoPlist": {
+        "NSCameraUsageDescription": "CourtVision uses the camera to record tennis research sessions.",
+        "NSPhotoLibraryUsageDescription": "CourtVision reads saved videos so it can show your recording list.",
+        "NSPhotoLibraryAddUsageDescription": "CourtVision saves tennis session recordings to your local photo library."
+      }
+    },
+    "android": {
+      "permissions": [
+        "CAMERA",
+        "READ_MEDIA_VIDEO",
+        "READ_EXTERNAL_STORAGE",
+        "WRITE_EXTERNAL_STORAGE"
+      ]
+    },
+    "plugins": [
+      [
+        "expo-camera",
+        {
+          "cameraPermission": "CourtVision uses the camera to record tennis research sessions."
+        }
+      ],
+      [
+        "expo-media-library",
+        {
+          "photosPermission": "CourtVision reads saved videos so it can show your recording list.",
+          "savePhotosPermission": "CourtVision saves tennis session recordings to your local photo library.",
+          "isAccessMediaLocationEnabled": false
+        }
+      ]
+    ]
+  }
+}
