@@ -1,7 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { CameraView, useCameraPermissions } from 'expo-camera';
-import * as MediaLibrary from 'expo-media-library/legacy';
-import { usePermissions as useMediaLibraryPermissions } from 'expo-media-library';
+import * as MediaLibrary from 'expo-media-library';
 import { StatusBar } from 'expo-status-bar';
 import Slider from '@react-native-community/slider';
 import {
@@ -27,7 +26,7 @@ export default function App() {
   const cameraRef = useRef(null);
 
   const [cameraPermission, requestCameraPermission] = useCameraPermissions();
-  const [mediaPermission, requestMediaPermission] = useMediaLibraryPermissions({
+  const [mediaPermission, requestMediaPermission] = MediaLibrary.usePermissions({
     granularPermissions: ['video'],
   });
 
