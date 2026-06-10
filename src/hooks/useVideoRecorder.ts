@@ -1,4 +1,4 @@
-import { CameraView, useCameraPermissions, useMicrophonePermissions } from 'expo-camera';
+import { CameraView, useCameraPermissions } from 'expo-camera';
 import * as MediaLibrary from 'expo-media-library';
 import { useCallback, useRef, useState } from 'react';
 
@@ -7,8 +7,6 @@ import { RecordingStatus } from '../types/video';
 export function useVideoRecorder() {
   const cameraRef = useRef<CameraView | null>(null);
   const [cameraPermission, requestCameraPermission] = useCameraPermissions();
-  const [microphonePermission, requestMicrophonePermission] = useMicrophonePermissions();
-  const [mediaLibraryPermission, requestMediaLibraryPermission] = MediaLibrary.usePermissions();
   const [recordingStatus, setRecordingStatus] = useState<RecordingStatus>('idle');
   const [lastRecordingUri, setLastRecordingUri] = useState<string | null>(null);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
@@ -17,28 +15,13 @@ export function useVideoRecorder() {
     const camera = cameraPermission?.granted
       ? cameraPermission
       : await requestCameraPermission();
-    const microphone = microphonePermission?.granted
-      ? microphonePermission
-      : await requestMicrophonePermission();
-    const mediaLibrary = mediaLibraryPermission?.granted
-      ? mediaLibraryPermission
-      : await requestMediaLibraryPermission();
 
-    const hasAllPermissions = camera.granted && microphone.granted && mediaLibrary.granted;
-
-    if (!hasAllPermissions) {
-      setErrorMessage('Camera, microphone, and gallery permissions are required.');
+    if (!camera.granted) {
+      setErrorMessage('Camera permission is required to record video.');
     }
 
-    return hasAllPermissions;
-  }, [
-    cameraPermission,
-    mediaLibraryPermission,
-    microphonePermission,
-    requestCameraPermission,
-    requestMediaLibraryPermission,
-    requestMicrophonePermission,
-  ]);
+    return camera.granted;
+  }, [cameraPermission, requestCameraPermission]);
 
   const startRecording = useCallback(async () => {
     if (recordingStatus === 'recording' || recordingStatus === 'saving') {
@@ -91,8 +74,6 @@ export function useVideoRecorder() {
   return {
     cameraRef,
     cameraPermission,
-    microphonePermission,
-    mediaLibraryPermission,
     recordingStatus,
     lastRecordingUri,
     errorMessage,

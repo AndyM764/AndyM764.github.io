@@ -66,14 +66,14 @@ export function VideoRecorderPanel() {
       </View>
 
       {hasCameraPermission ? (
-        <CameraView ref={cameraRef} facing="back" mode="video" style={styles.cameraPreview} />
+        <CameraView ref={cameraRef} facing="back" mode="video" mute style={styles.cameraPreview} />
       ) : (
         <View style={styles.permissionBox}>
           <Text style={styles.permissionTitle}>Camera permission required</Text>
           <Text style={styles.permissionText}>
-            Grant camera, microphone, and gallery permissions before recording tennis sessions.
+            Grant camera permission to record video-only tennis sessions.
           </Text>
-          <PrimaryButton label="Grant Recording Permissions" onPress={requestPermissions} />
+          <PrimaryButton label="Grant Camera Permission" onPress={requestPermissions} />
         </View>
       )}
 
