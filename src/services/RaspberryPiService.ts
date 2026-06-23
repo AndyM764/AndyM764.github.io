@@ -67,6 +67,14 @@ class RaspberryPiService {
     return this.connectionStatus;
   }
 
+  async startRecording(): Promise<void> {
+    await this.sendCommand('/start', 'Unable to start Raspberry Pi recording.');
+  }
+
+  async stopRecording(): Promise<void> {
+    await this.sendCommand('/stop', 'Unable to stop Raspberry Pi recording.');
+  }
+
   async sendParameters(parameters: TennisParameters): Promise<void> {
     const payload = {
       speed: parameters.speed,
@@ -85,6 +93,26 @@ class RaspberryPiService {
 
   setApiConfig(config: RaspberryPiApiConfig): void {
     this.apiConfig = config;
+  }
+
+  private async sendCommand(path: string, errorMessage: string): Promise<void> {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => {
+      controller.abort();
+    }, this.apiConfig.timeoutMs);
+
+    try {
+      const response = await fetch(`${this.apiConfig.baseUrl}${path}`, {
+        method: 'GET',
+        signal: controller.signal,
+      });
+
+      if (!response.ok) {
+        throw new Error(`${errorMessage} HTTP ${response.status}`);
+      }
+    } finally {
+      clearTimeout(timeout);
+    }
   }
 }
 

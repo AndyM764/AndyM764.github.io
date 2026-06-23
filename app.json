@@ -11,9 +11,6 @@
       "supportsTablet": true,
       "bundleIdentifier": "com.courtvision.v2",
       "infoPlist": {
-        "NSCameraUsageDescription": "CourtVision.V2 uses the camera to record tennis practice sessions.",
-        "NSPhotoLibraryUsageDescription": "CourtVision.V2 reads saved practice videos from your photo library.",
-        "NSPhotoLibraryAddUsageDescription": "CourtVision.V2 saves recorded practice videos to your photo library.",
         "NSLocalNetworkUsageDescription": "CourtVision.V2 will use the local network to communicate with Raspberry Pi devices.",
         "NSAppTransportSecurity": {
           "NSAllowsLocalNetworking": true
@@ -22,26 +19,7 @@
     },
     "android": {
       "package": "com.courtvision.v2",
-      "permissions": [
-        "android.permission.CAMERA"
-      ]
-    },
-    "plugins": [
-      [
-        "expo-camera",
-        {
-          "cameraPermission": "Allow CourtVision.V2 to access the camera for tennis recording.",
-          "recordAudioAndroid": false
-        }
-      ],
-      [
-        "expo-media-library",
-        {
-          "photosPermission": "Allow CourtVision.V2 to read saved practice videos.",
-          "savePhotosPermission": "Allow CourtVision.V2 to save tennis practice videos to your gallery.",
-          "isAccessMediaLocationEnabled": false
-        }
-      ]
-    ]
+      "permissions": []
+    }
   }
 }

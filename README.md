@@ -7,8 +7,8 @@ CourtVision.V2 is a fresh Expo SDK 54 React Native mobile app for iOS and Androi
 - Mock Raspberry Pi WiFi connection screen with connected/disconnected status and IP address display.
 - Tennis launcher sliders for ball speed, launch angle, and ball frequency.
 - JSON parameter payload logging through a service layer ready for future Raspberry Pi REST calls.
-- Expo Camera video recording with start/stop controls.
-- Saves recorded videos to the phone gallery with Expo Media Library.
+- Raspberry Pi camera recording controls with start/stop commands.
+- Videos remain stored on the Raspberry Pi until download support is added later.
 - Beginner-friendly source layout using `src/screens`, `src/components`, `src/services`, `src/hooks`, and `src/types`.
 
 ## Commands

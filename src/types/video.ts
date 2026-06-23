@@ -1,5 +1,1 @@
-export type RecordingStatus = 'idle' | 'recording' | 'saving' | 'saved' | 'error';
-
-export interface RecordingResult {
-  uri: string;
-}
+export type RecordingStatus = 'idle' | 'starting' | 'recording' | 'stopping' | 'error';

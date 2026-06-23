@@ -1,83 +1,61 @@
-import { CameraView, useCameraPermissions } from 'expo-camera';
-import * as MediaLibrary from 'expo-media-library';
-import { useCallback, useRef, useState } from 'react';
+import { useCallback, useState } from 'react';
 
+import { raspberryPiService } from '../services/RaspberryPiService';
 import { RecordingStatus } from '../types/video';
 
 export function useVideoRecorder() {
-  const cameraRef = useRef<CameraView | null>(null);
-  const [cameraPermission, requestCameraPermission] = useCameraPermissions();
   const [recordingStatus, setRecordingStatus] = useState<RecordingStatus>('idle');
-  const [lastRecordingUri, setLastRecordingUri] = useState<string | null>(null);
+  const [successMessage, setSuccessMessage] = useState<string | null>(null);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
 
-  const requestPermissions = useCallback(async () => {
-    const camera = cameraPermission?.granted
-      ? cameraPermission
-      : await requestCameraPermission();
-
-    if (!camera.granted) {
-      setErrorMessage('Camera permission is required to record video.');
-    }
-
-    return camera.granted;
-  }, [cameraPermission, requestCameraPermission]);
-
   const startRecording = useCallback(async () => {
-    if (recordingStatus === 'recording' || recordingStatus === 'saving') {
-      return;
-    }
-
-    if (!cameraRef.current) {
-      setErrorMessage('Camera is not ready yet.');
-      return;
-    }
-
-    const hasPermissions = await requestPermissions();
-
-    if (!hasPermissions) {
-      setRecordingStatus('error');
+    if (recordingStatus === 'starting' || recordingStatus === 'recording' || recordingStatus === 'stopping') {
       return;
     }
 
     try {
       setErrorMessage(null);
+      setSuccessMessage(null);
+      setRecordingStatus('starting');
+
+      await raspberryPiService.startRecording();
+
       setRecordingStatus('recording');
-
-      const recording = await cameraRef.current.recordAsync();
-
-      if (!recording?.uri) {
-        throw new Error('No recording URI returned by camera.');
-      }
-
-      setRecordingStatus('saving');
-      await MediaLibrary.saveToLibraryAsync(recording.uri);
-      setLastRecordingUri(recording.uri);
-      setRecordingStatus('saved');
-
-      // TODO: Queue the saved video for computer vision, ML, and cloud processing.
+      setSuccessMessage('Raspberry Pi recording started.');
     } catch (error) {
       setRecordingStatus('error');
-      setErrorMessage('Unable to save the recording.');
-      console.warn('[useVideoRecorder] Recording failed', error);
+      setSuccessMessage(null);
+      setErrorMessage('Unable to reach Raspberry Pi. Recording was not started.');
+      console.warn('[useVideoRecorder] Raspberry Pi start recording failed', error);
     }
-  }, [recordingStatus, requestPermissions]);
+  }, [recordingStatus]);
 
-  const stopRecording = useCallback(() => {
+  const stopRecording = useCallback(async () => {
     if (recordingStatus !== 'recording') {
       return;
     }
 
-    cameraRef.current?.stopRecording();
+    try {
+      setErrorMessage(null);
+      setSuccessMessage(null);
+      setRecordingStatus('stopping');
+
+      await raspberryPiService.stopRecording();
+
+      setRecordingStatus('idle');
+      setSuccessMessage('Raspberry Pi recording stopped. Video remains stored on the Raspberry Pi.');
+    } catch (error) {
+      setRecordingStatus('recording');
+      setSuccessMessage(null);
+      setErrorMessage('Unable to reach Raspberry Pi. Recording may still be active.');
+      console.warn('[useVideoRecorder] Raspberry Pi stop recording failed', error);
+    }
   }, [recordingStatus]);
 
   return {
-    cameraRef,
-    cameraPermission,
     recordingStatus,
-    lastRecordingUri,
+    successMessage,
     errorMessage,
-    requestPermissions,
     startRecording,
     stopRecording,
   };
