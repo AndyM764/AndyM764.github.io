@@ -24,6 +24,10 @@ export function WifiConnectionScreen() {
 
   return (
     <ScrollView contentContainerStyle={styles.content} style={styles.container}>
+      <View style={styles.buildBanner}>
+        <Text style={styles.buildBannerText}>COURTVISION PI BUILD</Text>
+      </View>
+
       <View style={styles.header}>
         <Text style={styles.eyebrow}>CourtVision.V2</Text>
         <Text style={styles.title}>Tennis Launcher Control</Text>
@@ -70,6 +74,22 @@ const styles = StyleSheet.create({
     gap: 18,
     padding: 20,
     paddingBottom: 36,
+  },
+  buildBanner: {
+    alignItems: 'center',
+    backgroundColor: '#facc15',
+    borderColor: '#f97316',
+    borderRadius: 18,
+    borderWidth: 4,
+    paddingHorizontal: 16,
+    paddingVertical: 18,
+  },
+  buildBannerText: {
+    color: '#111827',
+    fontSize: 34,
+    fontWeight: '900',
+    letterSpacing: 1,
+    textAlign: 'center',
   },
   header: {
     gap: 8,
