@@ -11,8 +11,6 @@ export function WifiConnectionScreen() {
     status,
     isLoading,
     errorMessage,
-    connect,
-    disconnect,
     refreshStatus,
     sendParameters,
   } = useRaspberryPiConnection();
@@ -37,9 +35,7 @@ export function WifiConnectionScreen() {
       <ConnectionPanel
         errorMessage={errorMessage}
         isLoading={isLoading}
-        onConnect={connect}
-        onDisconnect={disconnect}
-        onRefresh={refreshStatus}
+        onTestConnection={refreshStatus}
         status={status}
       />
 

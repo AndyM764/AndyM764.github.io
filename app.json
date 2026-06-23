@@ -14,7 +14,10 @@
         "NSCameraUsageDescription": "CourtVision.V2 uses the camera to record tennis practice sessions.",
         "NSPhotoLibraryUsageDescription": "CourtVision.V2 reads saved practice videos from your photo library.",
         "NSPhotoLibraryAddUsageDescription": "CourtVision.V2 saves recorded practice videos to your photo library.",
-        "NSLocalNetworkUsageDescription": "CourtVision.V2 will use the local network to communicate with Raspberry Pi devices."
+        "NSLocalNetworkUsageDescription": "CourtVision.V2 will use the local network to communicate with Raspberry Pi devices.",
+        "NSAppTransportSecurity": {
+          "NSAllowsLocalNetworking": true
+        }
       }
     },
     "android": {

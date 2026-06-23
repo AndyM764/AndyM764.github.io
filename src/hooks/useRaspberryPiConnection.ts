@@ -22,6 +22,10 @@ export function useRaspberryPiConnection() {
       const nextStatus = await raspberryPiService.getConnectionStatus();
       setStatus(nextStatus);
     } catch (error) {
+      setStatus({
+        state: 'disconnected',
+        ipAddress: '10.136.19.4',
+      });
       setErrorMessage('Unable to read Raspberry Pi connection status.');
       console.warn('[useRaspberryPiConnection] Status refresh failed', error);
     } finally {

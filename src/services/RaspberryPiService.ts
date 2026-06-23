@@ -1,8 +1,8 @@
 import { RaspberryPiApiConfig, RaspberryPiConnectionStatus } from '../types/raspberryPi';
 import { TennisParameters } from '../types/tennisParameters';
 
-const MOCK_RASPBERRY_PI_IP = '192.168.4.1';
-const MOCK_DELAY_MS = 350;
+const RASPBERRY_PI_IP = '10.136.19.4';
+const RASPBERRY_PI_BASE_URL = `http://${RASPBERRY_PI_IP}:5000`;
 
 class RaspberryPiService {
   private connectionStatus: RaspberryPiConnectionStatus = {
@@ -11,41 +11,51 @@ class RaspberryPiService {
   };
 
   private apiConfig: RaspberryPiApiConfig = {
-    baseUrl: `http://${MOCK_RASPBERRY_PI_IP}:8000`,
+    baseUrl: RASPBERRY_PI_BASE_URL,
     timeoutMs: 5000,
   };
 
   async connect(): Promise<RaspberryPiConnectionStatus> {
-    await this.simulateNetworkDelay();
-
-    this.connectionStatus = {
-      state: 'connected',
-      ipAddress: MOCK_RASPBERRY_PI_IP,
-    };
-
-    // TODO: Replace this mock with Raspberry Pi WiFi discovery or REST health check.
-    console.log('[RaspberryPiService] Mock connected', this.connectionStatus);
-
-    return this.connectionStatus;
+    return this.getConnectionStatus();
   }
 
   async disconnect(): Promise<RaspberryPiConnectionStatus> {
-    await this.simulateNetworkDelay();
-
     this.connectionStatus = {
       state: 'disconnected',
       ipAddress: null,
     };
 
-    console.log('[RaspberryPiService] Mock disconnected');
-
     return this.connectionStatus;
   }
 
   async getConnectionStatus(): Promise<RaspberryPiConnectionStatus> {
-    await this.simulateNetworkDelay();
+    const controller = new AbortController();
+    const timeout = setTimeout(() => {
+      controller.abort();
+    }, this.apiConfig.timeoutMs);
 
-    // TODO: Poll Raspberry Pi telemetry endpoint for real connection health.
+    try {
+      await fetch(this.apiConfig.baseUrl, {
+        method: 'GET',
+        signal: controller.signal,
+      });
+
+      this.connectionStatus = {
+        state: 'connected',
+        ipAddress: RASPBERRY_PI_IP,
+      };
+    } catch (error) {
+      this.connectionStatus = {
+        state: 'disconnected',
+        ipAddress: RASPBERRY_PI_IP,
+      };
+
+      console.warn('[RaspberryPiService] Raspberry Pi connection check failed', error);
+    } finally {
+      clearTimeout(timeout);
+    }
+
+    // TODO: Poll Raspberry Pi telemetry endpoint after the base health check succeeds.
     return this.connectionStatus;
   }
 
@@ -67,12 +77,6 @@ class RaspberryPiService {
 
   setApiConfig(config: RaspberryPiApiConfig): void {
     this.apiConfig = config;
-  }
-
-  private simulateNetworkDelay(): Promise<void> {
-    return new Promise((resolve) => {
-      setTimeout(resolve, MOCK_DELAY_MS);
-    });
   }
 }
 
