@@ -15,3 +15,5 @@ yarn-error.*
 *.orig.*
 android/
 ios/
+__pycache__/
+*.py[cod]
