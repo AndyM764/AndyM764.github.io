@@ -35,15 +35,23 @@ class RaspberryPiService {
     }, this.apiConfig.timeoutMs);
 
     try {
-      await fetch(this.apiConfig.baseUrl, {
+      const response = await fetch(`${this.apiConfig.baseUrl}/status`, {
         method: 'GET',
         signal: controller.signal,
       });
+      const payload = await response.json();
 
-      this.connectionStatus = {
-        state: 'connected',
-        ipAddress: RASPBERRY_PI_IP,
-      };
+      if (payload.status === 'ok') {
+        this.connectionStatus = {
+          state: 'connected',
+          ipAddress: RASPBERRY_PI_IP,
+        };
+      } else {
+        this.connectionStatus = {
+          state: 'disconnected',
+          ipAddress: RASPBERRY_PI_IP,
+        };
+      }
     } catch (error) {
       this.connectionStatus = {
         state: 'disconnected',

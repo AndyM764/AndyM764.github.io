@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useState } from 'react';
 
 import { raspberryPiService } from '../services/RaspberryPiService';
 import { RaspberryPiConnectionStatus } from '../types/raspberryPi';
@@ -6,7 +6,7 @@ import { TennisParameters } from '../types/tennisParameters';
 
 const initialStatus: RaspberryPiConnectionStatus = {
   state: 'disconnected',
-  ipAddress: null,
+  ipAddress: '10.136.19.4',
 };
 
 export function useRaspberryPiConnection() {
@@ -73,10 +73,6 @@ export function useRaspberryPiConnection() {
       console.warn('[useRaspberryPiConnection] Send parameters failed', error);
     }
   }, []);
-
-  useEffect(() => {
-    void refreshStatus();
-  }, [refreshStatus]);
 
   return {
     status,

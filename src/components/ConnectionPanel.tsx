@@ -27,7 +27,7 @@ export function ConnectionPanel({
       <View style={styles.statusRow}>
         <View style={[styles.connectionBadge, isConnected ? styles.connectedBadge : styles.disconnectedBadge]}>
           <Text style={styles.connectionLabel}>
-            {isConnected ? '● Connected to Raspberry Pi' : '● Disconnected'}
+            {isConnected ? 'Connected to Raspberry Pi' : 'Disconnected'}
           </Text>
         </View>
         {isLoading ? <ActivityIndicator color="#38bdf8" /> : null}
