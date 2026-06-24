@@ -1,0 +1,20 @@
+{
+  "expo": {
+    "name": "CourtVision.V3",
+    "slug": "courtvision-v3",
+    "version": "1.0.0",
+    "orientation": "portrait",
+    "userInterfaceStyle": "automatic",
+    "newArchEnabled": false,
+    "ios": {
+      "supportsTablet": true,
+      "bundleIdentifier": "com.courtvision.v3"
+    },
+    "android": {
+      "package": "com.courtvision.v3"
+    },
+    "plugins": [
+      "expo-video"
+    ]
+  }
+}
