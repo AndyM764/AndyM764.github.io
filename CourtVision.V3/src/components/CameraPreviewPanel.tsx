@@ -1,6 +1,6 @@
 import { useEffect } from "react";
 import { StyleSheet, Text, View } from "react-native";
-import { useVideoPlayer, VideoView } from "expo-video";
+import { useVideoPlayer, VideoView, type VideoSource } from "expo-video";
 
 import type { ServiceResult } from "../types/raspberryPi";
 import { AppButton } from "./AppButton";
@@ -29,7 +29,12 @@ export function CameraPreviewPanel({
 
   useEffect(() => {
     if (cameraEnabled && streamUrl) {
-      player.replace(streamUrl);
+      const hlsSource: VideoSource = {
+        uri: streamUrl,
+        contentType: "hls"
+      };
+
+      player.replace(hlsSource);
       player.play();
       return;
     }
