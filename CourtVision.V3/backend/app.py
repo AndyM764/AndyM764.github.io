@@ -9,7 +9,7 @@ import uuid
 from pathlib import Path
 from typing import Any
 
-from flask import Flask, Response, jsonify, request, send_from_directory
+from flask import Flask, Response, jsonify, request, send_file, send_from_directory
 
 app = Flask(__name__)
 
@@ -17,9 +17,8 @@ app = Flask(__name__)
 HLS_DIRECTORY = Path(os.environ.get("COURTVISION_HLS_DIR", "/tmp/courtvision-camera-hls"))
 HLS_PLAYLIST = HLS_DIRECTORY / "stream.m3u8"
 HLS_SEGMENT_PREFIX = "segment_"
-RECORDINGS_DIRECTORY = Path(
-    os.environ.get("COURTVISION_RECORDINGS_DIR", str(Path.home() / "CourtVision" / "recordings"))
-)
+OUTPUT_DIR = "/home/andy76/recordings"
+os.makedirs(OUTPUT_DIR, exist_ok=True)
 
 CAMERA_WIDTH = os.environ.get("COURTVISION_CAMERA_WIDTH", "1280")
 CAMERA_HEIGHT = os.environ.get("COURTVISION_CAMERA_HEIGHT", "720")
@@ -293,11 +292,12 @@ class RecordingManager:
 
     def _finalize_segments_to_mp4(self, recording_id: str, segments: list[Path]) -> Path:
         self._validate_system_commands()
-        RECORDINGS_DIRECTORY.mkdir(parents=True, exist_ok=True)
+        os.makedirs(OUTPUT_DIR, exist_ok=True)
+        output_path = Path(OUTPUT_DIR)
 
-        concat_file = RECORDINGS_DIRECTORY / f"{recording_id}.txt"
-        temporary_mp4 = RECORDINGS_DIRECTORY / f"{recording_id}.tmp.mp4"
-        final_mp4 = RECORDINGS_DIRECTORY / f"{recording_id}.mp4"
+        concat_file = output_path / f"{recording_id}.txt"
+        temporary_mp4 = output_path / f"{recording_id}.tmp.mp4"
+        final_mp4 = output_path / f"{recording_id}.mp4"
 
         concat_file.write_text(
             "".join(f"file '{self._escape_concat_path(segment)}'\n" for segment in segments),
@@ -507,14 +507,14 @@ def recording_download(filename: str) -> tuple[Response, int] | Response:
     if "/" in filename or not filename.endswith(".mp4"):
         return jsonify({"success": False, "message": "Invalid recording filename."}), 404
 
-    recording_path = RECORDINGS_DIRECTORY / filename
+    os.makedirs(OUTPUT_DIR, exist_ok=True)
+    recording_path = Path(OUTPUT_DIR) / filename
 
     if not recording_path.exists():
         return jsonify({"success": False, "message": "Recording was not found."}), 404
 
-    response = send_from_directory(
-        RECORDINGS_DIRECTORY,
-        filename,
+    response = send_file(
+        recording_path,
         as_attachment=True,
         download_name=filename,
         mimetype="video/mp4",

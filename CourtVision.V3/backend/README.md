@@ -59,11 +59,5 @@ GET /recordings/<filename>.mp4
 By default, recordings are stored in:
 
 ```txt
-~/CourtVision/recordings
-```
-
-Override this with:
-
-```sh
-export COURTVISION_RECORDINGS_DIR=/path/to/recordings
+/home/andy76/recordings
 ```
