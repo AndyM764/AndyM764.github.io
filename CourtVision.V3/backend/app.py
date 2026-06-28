@@ -5,6 +5,7 @@ import socket
 import subprocess
 import threading
 import time
+import uuid
 from pathlib import Path
 from typing import Any
 
@@ -16,11 +17,15 @@ app = Flask(__name__)
 HLS_DIRECTORY = Path(os.environ.get("COURTVISION_HLS_DIR", "/tmp/courtvision-camera-hls"))
 HLS_PLAYLIST = HLS_DIRECTORY / "stream.m3u8"
 HLS_SEGMENT_PREFIX = "segment_"
+RECORDINGS_DIRECTORY = Path(
+    os.environ.get("COURTVISION_RECORDINGS_DIR", str(Path.home() / "CourtVision" / "recordings"))
+)
 
 CAMERA_WIDTH = os.environ.get("COURTVISION_CAMERA_WIDTH", "1280")
 CAMERA_HEIGHT = os.environ.get("COURTVISION_CAMERA_HEIGHT", "720")
 CAMERA_FPS = os.environ.get("COURTVISION_CAMERA_FPS", "30")
 CAMERA_START_TIMEOUT_SECONDS = float(os.environ.get("COURTVISION_CAMERA_START_TIMEOUT", "8"))
+RECORDING_SEGMENT_SETTLE_SECONDS = float(os.environ.get("COURTVISION_RECORDING_SEGMENT_SETTLE", "1.2"))
 
 last_parameters: dict[str, Any] | None = None
 
@@ -70,6 +75,27 @@ class CameraStreamManager:
 
         return HLS_PLAYLIST.exists() and HLS_PLAYLIST.stat().st_size > 0
 
+    def get_latest_segment_index(self) -> int:
+        indexes = [index for index, _ in self.get_segment_files()]
+        return max(indexes, default=-1)
+
+    def get_segment_files_after(self, start_index: int) -> list[Path]:
+        return [path for index, path in self.get_segment_files() if index > start_index]
+
+    def get_segment_files(self) -> list[tuple[int, Path]]:
+        if not HLS_DIRECTORY.exists():
+            return []
+
+        segment_files: list[tuple[int, Path]] = []
+
+        for path in HLS_DIRECTORY.glob(f"{HLS_SEGMENT_PREFIX}*.ts"):
+            index = self._parse_segment_index(path)
+
+            if index is not None:
+                segment_files.append((index, path))
+
+        return sorted(segment_files, key=lambda item: item[0])
+
     def _start_locked(self) -> None:
         if self._is_stream_process_running():
             return
@@ -107,6 +133,8 @@ class CameraStreamManager:
             "low_delay",
             "-f",
             "h264",
+            "-r",
+            CAMERA_FPS,
             "-i",
             "pipe:0",
             "-c:v",
@@ -118,7 +146,7 @@ class CameraStreamManager:
             "-hls_list_size",
             "4",
             "-hls_flags",
-            "delete_segments+append_list+omit_endlist",
+            "append_list+omit_endlist",
             "-hls_segment_filename",
             f"{HLS_SEGMENT_PREFIX}%05d.ts",
             "-hls_base_url",
@@ -129,7 +157,7 @@ class CameraStreamManager:
         self._camera_process = subprocess.Popen(
             camera_command,
             stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
         )
 
         if self._camera_process.stdout is None:
@@ -141,7 +169,7 @@ class CameraStreamManager:
             cwd=HLS_DIRECTORY,
             stdin=self._camera_process.stdout,
             stdout=subprocess.DEVNULL,
-            stderr=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
         )
 
         self._camera_process.stdout.close()
@@ -175,6 +203,17 @@ class CameraStreamManager:
         if shutil.which("ffmpeg") is None:
             raise RuntimeError("ffmpeg is not installed or not available on PATH.")
 
+    def _parse_segment_index(self, path: Path) -> int | None:
+        if not path.name.startswith(HLS_SEGMENT_PREFIX) or not path.name.endswith(".ts"):
+            return None
+
+        index_text = path.stem.removeprefix(HLS_SEGMENT_PREFIX)
+
+        try:
+            return int(index_text)
+        except ValueError:
+            return None
+
     def _terminate_process(self, process: subprocess.Popen[bytes] | None) -> None:
         if process is None or process.poll() is not None:
             return
@@ -189,6 +228,166 @@ class CameraStreamManager:
 
 
 camera_stream_manager = CameraStreamManager()
+
+
+class RecordingManager:
+    def __init__(self, stream_manager: CameraStreamManager) -> None:
+        self._stream_manager = stream_manager
+        self._lock = threading.Lock()
+        self._active_recording: dict[str, Any] | None = None
+
+    def start(self) -> str:
+        with self._lock:
+            if self._active_recording is not None:
+                raise RuntimeError("A recording is already in progress.")
+
+            camera_was_enabled = self._stream_manager.enabled
+
+            if not camera_was_enabled:
+                self._stream_manager.set_enabled(True)
+
+            if not self._stream_manager.ensure_playlist_ready(CAMERA_START_TIMEOUT_SECONDS):
+                if not camera_was_enabled:
+                    self._stream_manager.set_enabled(False)
+
+                raise RuntimeError("Camera stream was not ready for recording.")
+
+            recording_id = uuid.uuid4().hex
+            start_segment_index = (
+                self._stream_manager.get_latest_segment_index() if camera_was_enabled else -1
+            )
+
+            self._active_recording = {
+                "recording_id": recording_id,
+                "start_segment_index": start_segment_index,
+                "camera_was_enabled": camera_was_enabled,
+            }
+
+            return recording_id
+
+    def stop(self, recording_id: str) -> tuple[str, Path]:
+        with self._lock:
+            if self._active_recording is None:
+                raise RuntimeError("No recording is in progress.")
+
+            if self._active_recording["recording_id"] != recording_id:
+                raise RuntimeError("Recording ID does not match the active recording.")
+
+            recording = self._active_recording
+            self._active_recording = None
+
+        time.sleep(RECORDING_SEGMENT_SETTLE_SECONDS)
+
+        segments = self._stream_manager.get_segment_files_after(recording["start_segment_index"])
+
+        try:
+            if len(segments) == 0:
+                raise RuntimeError("No camera segments were captured for this recording.")
+
+            mp4_path = self._finalize_segments_to_mp4(recording_id, segments)
+
+            return mp4_path.name, mp4_path
+        finally:
+            if not recording["camera_was_enabled"]:
+                self._stream_manager.set_enabled(False)
+
+    def _finalize_segments_to_mp4(self, recording_id: str, segments: list[Path]) -> Path:
+        self._validate_system_commands()
+        RECORDINGS_DIRECTORY.mkdir(parents=True, exist_ok=True)
+
+        concat_file = RECORDINGS_DIRECTORY / f"{recording_id}.txt"
+        temporary_mp4 = RECORDINGS_DIRECTORY / f"{recording_id}.tmp.mp4"
+        final_mp4 = RECORDINGS_DIRECTORY / f"{recording_id}.mp4"
+
+        concat_file.write_text(
+            "".join(f"file '{self._escape_concat_path(segment)}'\n" for segment in segments),
+            encoding="utf-8",
+        )
+
+        ffmpeg_command = [
+            "ffmpeg",
+            "-y",
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-f",
+            "concat",
+            "-safe",
+            "0",
+            "-i",
+            str(concat_file),
+            "-an",
+            "-c:v",
+            "libx264",
+            "-preset",
+            "veryfast",
+            "-pix_fmt",
+            "yuv420p",
+            "-profile:v",
+            "baseline",
+            "-level",
+            "3.1",
+            "-movflags",
+            "+faststart",
+            str(temporary_mp4),
+        ]
+
+        completed = subprocess.run(ffmpeg_command, capture_output=True, text=True, check=False)
+
+        if completed.returncode != 0:
+            raise RuntimeError(
+                "Unable to finalize recording as MP4: "
+                f"{completed.stderr.strip() or 'ffmpeg failed.'}"
+            )
+
+        self._validate_mp4(temporary_mp4)
+        temporary_mp4.replace(final_mp4)
+        concat_file.unlink(missing_ok=True)
+
+        return final_mp4
+
+    def _validate_mp4(self, mp4_path: Path) -> None:
+        if not mp4_path.exists() or mp4_path.stat().st_size == 0:
+            raise RuntimeError("Finalized MP4 file was not created.")
+
+        if shutil.which("ffprobe") is None:
+            return
+
+        ffprobe_command = [
+            "ffprobe",
+            "-v",
+            "error",
+            "-select_streams",
+            "v:0",
+            "-show_entries",
+            "format=duration",
+            "-of",
+            "default=noprint_wrappers=1:nokey=1",
+            str(mp4_path),
+        ]
+
+        completed = subprocess.run(ffprobe_command, capture_output=True, text=True, check=False)
+
+        if completed.returncode != 0:
+            raise RuntimeError("Finalized MP4 failed validation with ffprobe.")
+
+        try:
+            duration = float(completed.stdout.strip())
+        except ValueError as error:
+            raise RuntimeError("Finalized MP4 does not contain a valid duration.") from error
+
+        if duration <= 0:
+            raise RuntimeError("Finalized MP4 duration is invalid.")
+
+    def _validate_system_commands(self) -> None:
+        if shutil.which("ffmpeg") is None:
+            raise RuntimeError("ffmpeg is not installed or not available on PATH.")
+
+    def _escape_concat_path(self, path: Path) -> str:
+        return str(path).replace("'", "'\\''")
+
+
+recording_manager = RecordingManager(camera_stream_manager)
 
 
 @app.get("/info")
@@ -264,6 +463,63 @@ def camera_hls_segment(filename: str) -> tuple[Response, int] | Response:
 
     response = send_from_directory(HLS_DIRECTORY, filename, mimetype="video/mp2t")
     response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
+    return response
+
+
+@app.post("/recording/start")
+def recording_start() -> tuple[Response, int] | Response:
+    try:
+        recording_id = recording_manager.start()
+        return jsonify({"success": True, "recordingId": recording_id})
+    except RuntimeError as error:
+        return jsonify({"success": False, "message": str(error)}), 500
+
+
+@app.post("/recording/stop")
+def recording_stop() -> tuple[Response, int] | Response:
+    payload = request.get_json(silent=True)
+
+    if not isinstance(payload, dict) or not isinstance(payload.get("recordingId"), str):
+        return jsonify({"success": False, "message": "Recording ID is required."}), 400
+
+    recording_id = payload["recordingId"].strip()
+
+    if len(recording_id) == 0:
+        return jsonify({"success": False, "message": "Recording ID is required."}), 400
+
+    try:
+        filename, _ = recording_manager.stop(recording_id)
+
+        return jsonify(
+            {
+                "success": True,
+                "recordingId": recording_id,
+                "downloadUrl": f"/recordings/{filename}",
+                "filename": filename,
+            }
+        )
+    except RuntimeError as error:
+        return jsonify({"success": False, "message": str(error)}), 500
+
+
+@app.get("/recordings/<path:filename>")
+def recording_download(filename: str) -> tuple[Response, int] | Response:
+    if "/" in filename or not filename.endswith(".mp4"):
+        return jsonify({"success": False, "message": "Invalid recording filename."}), 404
+
+    recording_path = RECORDINGS_DIRECTORY / filename
+
+    if not recording_path.exists():
+        return jsonify({"success": False, "message": "Recording was not found."}), 404
+
+    response = send_from_directory(
+        RECORDINGS_DIRECTORY,
+        filename,
+        as_attachment=True,
+        download_name=filename,
+        mimetype="video/mp4",
+    )
+    response.headers["Cache-Control"] = "no-store"
     return response
 
 

@@ -39,3 +39,31 @@ The app listens on `0.0.0.0:5000` by default.
 `GET /camera/stream` returns the live HLS playlist consumed by the Expo app.
 
 The stream uses the Raspberry Pi Camera Module through `rpicam-vid`; it does not use fake images or the phone camera.
+
+## Recording
+
+The backend does not save raw `.h264` files as the final output.
+
+`POST /recording/start` starts recording against the live Raspberry Pi camera stream.
+
+`POST /recording/stop` finalizes the captured camera segments into a valid `.mp4` file using `ffmpeg`.
+
+The final MP4 is transcoded to mobile-compatible H.264 video and written with `+faststart` so the `moov` atom is present and iOS/Android can play the downloaded file.
+
+Download finalized recordings from:
+
+```txt
+GET /recordings/<filename>.mp4
+```
+
+By default, recordings are stored in:
+
+```txt
+~/CourtVision/recordings
+```
+
+Override this with:
+
+```sh
+export COURTVISION_RECORDINGS_DIR=/path/to/recordings
+```
