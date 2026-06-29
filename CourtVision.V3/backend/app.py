@@ -23,7 +23,10 @@ os.makedirs(OUTPUT_DIR, exist_ok=True)
 CAMERA_WIDTH = os.environ.get("COURTVISION_CAMERA_WIDTH", "1280")
 CAMERA_HEIGHT = os.environ.get("COURTVISION_CAMERA_HEIGHT", "720")
 CAMERA_FPS = os.environ.get("COURTVISION_CAMERA_FPS", "30")
+CAMERA_INTRA_PERIOD = os.environ.get("COURTVISION_CAMERA_INTRA_PERIOD", "15")
 CAMERA_START_TIMEOUT_SECONDS = float(os.environ.get("COURTVISION_CAMERA_START_TIMEOUT", "8"))
+HLS_SEGMENT_SECONDS = os.environ.get("COURTVISION_HLS_SEGMENT_SECONDS", "0.5")
+HLS_LIST_SIZE = os.environ.get("COURTVISION_HLS_LIST_SIZE", "3")
 RECORDING_SEGMENT_SETTLE_SECONDS = float(os.environ.get("COURTVISION_RECORDING_SEGMENT_SETTLE", "1.2"))
 
 last_parameters: dict[str, Any] | None = None
@@ -116,6 +119,8 @@ class CameraStreamManager:
             CAMERA_HEIGHT,
             "--framerate",
             CAMERA_FPS,
+            "--intra",
+            CAMERA_INTRA_PERIOD,
             "--nopreview",
             "-o",
             "-",
@@ -141,11 +146,13 @@ class CameraStreamManager:
             "-f",
             "hls",
             "-hls_time",
-            "1",
+            HLS_SEGMENT_SECONDS,
             "-hls_list_size",
-            "4",
+            HLS_LIST_SIZE,
             "-hls_flags",
-            "append_list+omit_endlist",
+            "append_list+omit_endlist+independent_segments+program_date_time",
+            "-hls_allow_cache",
+            "0",
             "-hls_segment_filename",
             f"{HLS_SEGMENT_PREFIX}%05d.ts",
             "-hls_base_url",
@@ -442,6 +449,15 @@ def camera_state() -> tuple[Response, int] | Response:
 
 @app.get("/camera/stream")
 def camera_stream() -> tuple[Response, int] | Response:
+    return serve_camera_playlist()
+
+
+@app.get("/camera/stream.m3u8")
+def camera_stream_playlist() -> tuple[Response, int] | Response:
+    return serve_camera_playlist()
+
+
+def serve_camera_playlist() -> tuple[Response, int] | Response:
     if not camera_stream_manager.enabled:
         return jsonify({"success": False, "message": "Camera stream is disabled."}), 409
 
@@ -450,6 +466,8 @@ def camera_stream() -> tuple[Response, int] | Response:
 
     response = send_from_directory(HLS_DIRECTORY, HLS_PLAYLIST.name, mimetype="application/vnd.apple.mpegurl")
     response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
+    response.headers["Pragma"] = "no-cache"
+    response.headers["Expires"] = "0"
     return response
 
 

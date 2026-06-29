@@ -124,7 +124,7 @@ class RaspberryPiService {
   }
 
   getCameraStreamUrl(): string {
-    return this.resolveBackendUrl("/camera/stream");
+    return this.resolveBackendUrl(`/camera/stream.m3u8?ts=${Date.now()}`);
   }
 
   async startRecording(): Promise<StartRecordingResponse> {

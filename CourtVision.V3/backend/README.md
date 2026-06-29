@@ -32,13 +32,27 @@ python app.py
 
 The app listens on `0.0.0.0:5000` by default.
 
-## Camera preview
+## Low-latency camera preview
 
-`POST /camera/state` starts or stops the HLS preview pipeline.
+CourtVision uses HLS for the React Native preview because it is supported by `expo-video` in Expo Go on iOS and Android without adding native streaming modules.
 
-`GET /camera/stream` returns the live HLS playlist consumed by the Expo app.
+`POST /camera/state` starts or stops the low-latency HLS preview pipeline.
+
+`GET /camera/stream.m3u8` returns the live HLS playlist consumed by the Expo app.
+
+`GET /camera/stream` remains available as a compatibility alias.
 
 The stream uses the Raspberry Pi Camera Module through `rpicam-vid`; it does not use fake images or the phone camera.
+
+Default low-latency settings:
+
+```txt
+COURTVISION_HLS_SEGMENT_SECONDS=0.5
+COURTVISION_HLS_LIST_SIZE=3
+COURTVISION_CAMERA_INTRA_PERIOD=15
+```
+
+At 30 fps, an intra period of 15 requests a keyframe about every 0.5 seconds so HLS can create shorter live segments for local WiFi/hotspot viewing.
 
 ## Recording
 
