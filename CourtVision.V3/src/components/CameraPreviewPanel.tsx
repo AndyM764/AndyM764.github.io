@@ -11,6 +11,7 @@ type CameraPreviewPanelProps = {
   cameraEnabled: boolean;
   isUpdating: boolean;
   streamUrl: string | null;
+  recordingActive: boolean;
   result: ServiceResult | null;
   onToggleCamera: (enabled: boolean) => void;
 };
@@ -19,6 +20,7 @@ export function CameraPreviewPanel({
   cameraEnabled,
   isUpdating,
   streamUrl,
+  recordingActive,
   result,
   onToggleCamera
 }: CameraPreviewPanelProps) {
@@ -44,18 +46,21 @@ export function CameraPreviewPanel({
   }, [cameraEnabled, player, streamUrl]);
 
   return (
-    <AppCard title="Raspberry Pi Camera">
+    <AppCard title="Camera Preview">
+      <Text style={styles.note}>
+        Preview and recording cannot run at the same time on the Pi camera.
+      </Text>
       <View style={styles.buttonRow}>
         <AppButton
-          disabled={isUpdating}
+          disabled={isUpdating || recordingActive}
           onPress={() => onToggleCamera(true)}
-          title="Camera ON"
+          title="Preview ON"
           variant={cameraEnabled ? "primary" : "secondary"}
         />
         <AppButton
           disabled={isUpdating}
           onPress={() => onToggleCamera(false)}
-          title="Camera OFF"
+          title="Preview OFF"
           variant={!cameraEnabled ? "primary" : "secondary"}
         />
       </View>
@@ -70,7 +75,9 @@ export function CameraPreviewPanel({
             style={styles.video}
           />
         ) : (
-          <Text style={styles.blankText}>Camera preview is off.</Text>
+          <Text style={styles.blankText}>
+            {recordingActive ? "Preview disabled during recording." : "Camera preview is off."}
+          </Text>
         )}
       </View>
 
@@ -91,6 +98,11 @@ const styles = StyleSheet.create({
   buttonRow: {
     flexDirection: "row",
     gap: 12
+  },
+  note: {
+    color: "#64748b",
+    fontSize: 14,
+    fontWeight: "600"
   },
   preview: {
     alignItems: "center",

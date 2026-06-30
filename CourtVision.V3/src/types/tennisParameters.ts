@@ -1,6 +1,7 @@
 export type TennisParameters = {
   speed: number;
-  angle: number;
+  elevation: number;
+  spin: number;
   frequency: number;
 };
 

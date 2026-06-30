@@ -1,5 +1,6 @@
-import { useCallback, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 
+import { raspberryPiConfig } from "../config/raspberryPiConfig";
 import { raspberryPiService } from "../services/RaspberryPiService";
 import type { ConnectionStatus, PiInfo } from "../types/raspberryPi";
 
@@ -33,6 +34,16 @@ export function useRaspberryPi(): UseRaspberryPiResult {
       setIsRefreshing(false);
     }
   }, []);
+
+  useEffect(() => {
+    void refresh();
+
+    const interval = setInterval(() => {
+      void refresh();
+    }, raspberryPiConfig.connectionPollIntervalMs);
+
+    return () => clearInterval(interval);
+  }, [refresh]);
 
   return {
     piInfo,

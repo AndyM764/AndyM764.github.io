@@ -5,6 +5,9 @@ export type PiInfo = {
 
 export type PiStatusResponse = {
   status: "ok";
+  cameraPreviewEnabled?: boolean;
+  recordingActive?: boolean;
+  ballMachinePower?: BallMachinePower;
 };
 
 export type ConnectionStatus = "connected" | "disconnected";
@@ -23,3 +26,7 @@ export type ServiceResult = {
 export type CameraStateResponse = ServiceResult;
 
 export type BallMachinePower = "on" | "off";
+
+export type BallMachineStateResponse = ServiceResult & {
+  power?: BallMachinePower;
+};

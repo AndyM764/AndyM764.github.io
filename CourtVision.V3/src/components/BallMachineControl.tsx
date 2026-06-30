@@ -25,19 +25,19 @@ export function BallMachineControl({
         <AppButton
           disabled={isUpdating}
           onPress={() => onChangePower("on")}
-          title="ON"
+          title="Ball Machine ON"
           variant={power === "on" ? "primary" : "secondary"}
         />
         <AppButton
           disabled={isUpdating}
           onPress={() => onChangePower("off")}
-          title="OFF"
+          title="Ball Machine OFF"
           variant={power === "off" ? "primary" : "secondary"}
         />
       </View>
       <StatusMessage
-        message={result?.message ?? "Backend hardware integration is pending."}
-        tone={result?.success ? "success" : "info"}
+        message={result?.message ?? null}
+        tone={result?.success ? "success" : "error"}
       />
     </AppCard>
   );

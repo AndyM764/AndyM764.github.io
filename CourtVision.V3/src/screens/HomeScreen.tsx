@@ -76,24 +76,25 @@ export function HomeScreen() {
     }
   }, []);
 
+  const handleStartRecording = useCallback(async () => {
+    if (cameraEnabled) {
+      await handleToggleCamera(false);
+    }
+
+    await recording.startRecording();
+  }, [cameraEnabled, handleToggleCamera, recording]);
+
   const sendResultTone = tennisParameters.sendResult?.success ? "success" : "error";
 
   return (
     <SafeAreaView style={styles.safeArea}>
       <ScrollView contentContainerStyle={styles.content}>
         <View style={styles.header}>
-          <Text style={styles.title}>CourtVision.V3</Text>
+          <Text style={styles.title}>CourtVision V4</Text>
           <Text style={styles.subtitle}>
             Raspberry Pi controlled tennis training system
           </Text>
         </View>
-
-        <BallMachineControl
-          isUpdating={isUpdatingBallMachine}
-          onChangePower={handleBallMachinePower}
-          power={ballMachinePower}
-          result={ballMachineResult}
-        />
 
         <RaspberryPiInfoCard info={raspberryPi.piInfo} />
 
@@ -104,20 +105,28 @@ export function HomeScreen() {
         />
         <StatusMessage message={raspberryPi.errorMessage} tone="error" />
 
+        <RecordingControls
+          errorMessage={recording.errorMessage}
+          lastSavedVideoPath={recording.lastSavedVideoPath}
+          onStartRecording={handleStartRecording}
+          onStopRecording={recording.stopRecording}
+          recordingState={recording.recordingState}
+        />
+
         <CameraPreviewPanel
           cameraEnabled={cameraEnabled}
           isUpdating={isUpdatingCamera}
           onToggleCamera={handleToggleCamera}
+          recordingActive={recording.recordingState === "recording"}
           result={cameraResult}
           streamUrl={cameraStreamUrl}
         />
 
-        <RecordingControls
-          errorMessage={recording.errorMessage}
-          lastSavedVideoPath={recording.lastSavedVideoPath}
-          onStartRecording={recording.startRecording}
-          onStopRecording={recording.stopRecording}
-          recordingState={recording.recordingState}
+        <BallMachineControl
+          isUpdating={isUpdatingBallMachine}
+          onChangePower={handleBallMachinePower}
+          power={ballMachinePower}
+          result={ballMachineResult}
         />
 
         <AppCard title="Tennis Parameters">
@@ -131,13 +140,22 @@ export function HomeScreen() {
             value={tennisParameters.speed}
           />
           <TennisParameterSlider
-            label="Launch Angle"
+            label="Elevation"
             maximumValue={90}
             minimumValue={0}
-            onValueChange={tennisParameters.setAngle}
+            onValueChange={tennisParameters.setElevation}
             step={1}
             unit="degrees"
-            value={tennisParameters.angle}
+            value={tennisParameters.elevation}
+          />
+          <TennisParameterSlider
+            label="Spin"
+            maximumValue={5000}
+            minimumValue={-5000}
+            onValueChange={tennisParameters.setSpin}
+            step={100}
+            unit="rpm"
+            value={tennisParameters.spin}
           />
           <TennisParameterSlider
             label="Ball Frequency"
@@ -155,15 +173,6 @@ export function HomeScreen() {
           />
           <StatusMessage message={tennisParameters.sendResult?.message ?? null} tone={sendResultTone} />
         </AppCard>
-
-        <AppCard title="Future Expansion">
-          <Text style={styles.futureText}>TODO: TrackNet</Text>
-          <Text style={styles.futureText}>TODO: Computer Vision</Text>
-          <Text style={styles.futureText}>TODO: Machine Learning</Text>
-          <Text style={styles.futureText}>TODO: Shot Detection</Text>
-          <Text style={styles.futureText}>TODO: Cloud Processing</Text>
-          <Text style={styles.futureText}>TODO: Real-time Raspberry Pi telemetry</Text>
-        </AppCard>
       </ScrollView>
     </SafeAreaView>
   );
@@ -174,11 +183,6 @@ const styles = StyleSheet.create({
     gap: 18,
     padding: 18,
     paddingBottom: 36
-  },
-  futureText: {
-    color: "#334155",
-    fontSize: 15,
-    fontWeight: "700"
   },
   header: {
     gap: 6

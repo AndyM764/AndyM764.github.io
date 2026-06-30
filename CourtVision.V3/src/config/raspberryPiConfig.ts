@@ -10,9 +10,13 @@ export type RaspberryPiRuntimeConfig = {
    */
   baseUrl: string;
   requestTimeoutMs: number;
+  recordingRequestTimeoutMs: number;
+  connectionPollIntervalMs: number;
 };
 
 export const raspberryPiConfig: RaspberryPiRuntimeConfig = {
   baseUrl: process.env.EXPO_PUBLIC_RASPBERRY_PI_BASE_URL?.trim() ?? "",
-  requestTimeoutMs: 8000
+  requestTimeoutMs: 8000,
+  recordingRequestTimeoutMs: 60000,
+  connectionPollIntervalMs: 5000
 };

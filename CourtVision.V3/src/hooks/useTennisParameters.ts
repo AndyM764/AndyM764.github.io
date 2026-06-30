@@ -7,14 +7,16 @@ type UseTennisParametersResult = TennisParameters & {
   isSending: boolean;
   sendResult: ParameterTransmissionResult | null;
   setSpeed: (value: number) => void;
-  setAngle: (value: number) => void;
+  setElevation: (value: number) => void;
+  setSpin: (value: number) => void;
   setFrequency: (value: number) => void;
   sendParameters: () => Promise<void>;
 };
 
 export function useTennisParameters(): UseTennisParametersResult {
   const [speed, setSpeed] = useState(0);
-  const [angle, setAngle] = useState(0);
+  const [elevation, setElevation] = useState(0);
+  const [spin, setSpin] = useState(0);
   const [frequency, setFrequency] = useState(0);
   const [isSending, setIsSending] = useState(false);
   const [sendResult, setSendResult] = useState<ParameterTransmissionResult | null>(null);
@@ -26,7 +28,8 @@ export function useTennisParameters(): UseTennisParametersResult {
     try {
       const result = await raspberryPiService.sendParameters({
         speed,
-        angle,
+        elevation,
+        spin,
         frequency
       });
       setSendResult(result);
@@ -38,16 +41,18 @@ export function useTennisParameters(): UseTennisParametersResult {
     } finally {
       setIsSending(false);
     }
-  }, [angle, frequency, speed]);
+  }, [elevation, frequency, speed, spin]);
 
   return {
     speed,
-    angle,
+    elevation,
+    spin,
     frequency,
     isSending,
     sendResult,
     setSpeed,
-    setAngle,
+    setElevation,
+    setSpin,
     setFrequency,
     sendParameters
   };

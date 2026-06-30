@@ -1,6 +1,7 @@
 import { raspberryPiConfig, type RaspberryPiRuntimeConfig } from "../config/raspberryPiConfig";
 import type {
   BallMachinePower,
+  BallMachineStateResponse,
   CameraStateResponse,
   PiInfo,
   PiStatusResponse,
@@ -38,7 +39,8 @@ class RaspberryPiService {
       raspberryPiConfig
     ),
     private readonly storageService: VideoStorageService = videoStorageService,
-    private readonly requestTimeoutMs: number = raspberryPiConfig.requestTimeoutMs
+    private readonly requestTimeoutMs: number = raspberryPiConfig.requestTimeoutMs,
+    private readonly recordingRequestTimeoutMs: number = raspberryPiConfig.recordingRequestTimeoutMs
   ) {}
 
   async refreshPiState(): Promise<RaspberryPiState> {
@@ -96,7 +98,17 @@ class RaspberryPiService {
     }
 
     return {
-      status: "ok"
+      status: "ok",
+      cameraPreviewEnabled:
+        typeof response.cameraPreviewEnabled === "boolean"
+          ? response.cameraPreviewEnabled
+          : undefined,
+      recordingActive:
+        typeof response.recordingActive === "boolean" ? response.recordingActive : undefined,
+      ballMachinePower:
+        response.ballMachinePower === "on" || response.ballMachinePower === "off"
+          ? response.ballMachinePower
+          : undefined
     };
   }
 
@@ -119,7 +131,7 @@ class RaspberryPiService {
 
     return this.toServiceResult(
       response,
-      enabled ? "Raspberry Pi camera enabled." : "Raspberry Pi camera disabled."
+      enabled ? "Raspberry Pi camera preview enabled." : "Raspberry Pi camera preview disabled."
     );
   }
 
@@ -128,12 +140,16 @@ class RaspberryPiService {
   }
 
   async startRecording(): Promise<StartRecordingResponse> {
-    const response = await this.request<unknown>("/recording/start", {
-      method: "POST"
-    });
+    const response = await this.request<unknown>(
+      "/recording/start",
+      {
+        method: "POST"
+      },
+      this.recordingRequestTimeoutMs
+    );
 
     if (!this.isRecord(response) || response.success !== true) {
-      throw new Error("The Raspberry Pi did not start recording.");
+      throw new Error(this.extractErrorMessage(response, "The Raspberry Pi did not start recording."));
     }
 
     if (typeof response.recordingId !== "string" || response.recordingId.trim().length === 0) {
@@ -152,13 +168,17 @@ class RaspberryPiService {
       throw new Error("A recording ID is required to stop recording.");
     }
 
-    const response = await this.request<unknown>("/recording/stop", {
-      method: "POST",
-      body: JSON.stringify({ recordingId })
-    });
+    const response = await this.request<unknown>(
+      "/recording/stop",
+      {
+        method: "POST",
+        body: JSON.stringify({ recordingId })
+      },
+      this.recordingRequestTimeoutMs
+    );
 
     if (!this.isRecord(response) || response.success !== true) {
-      throw new Error("The Raspberry Pi did not finalize the recording.");
+      throw new Error(this.extractErrorMessage(response, "The Raspberry Pi did not finalize the recording."));
     }
 
     if (typeof response.downloadUrl !== "string" || response.downloadUrl.trim().length === 0) {
@@ -176,23 +196,65 @@ class RaspberryPiService {
 
   async downloadRecording(downloadUrl: string, filename?: string): Promise<SavedVideo> {
     const absoluteDownloadUrl = this.resolveBackendUrl(downloadUrl);
-    return this.storageService.saveRecordingFromUrl(absoluteDownloadUrl, filename);
+    const resolvedFilename = filename ?? this.getFilenameFromDownloadUrl(downloadUrl);
+    const savedVideo = await this.storageService.saveRecordingFromUrl(
+      absoluteDownloadUrl,
+      resolvedFilename
+    );
+
+    if (resolvedFilename) {
+      await this.deleteRecordingFromPi(resolvedFilename);
+    }
+
+    return savedVideo;
   }
 
-  async setBallMachinePower(power: BallMachinePower): Promise<ServiceResult> {
-    void power;
+  async deleteRecordingFromPi(filename: string): Promise<void> {
+    if (filename.trim().length === 0) {
+      return;
+    }
 
-    // TODO: Wire this to the Raspberry Pi ball machine hardware endpoint when it is finalized.
-    return {
-      success: false,
-      message: "Ball machine backend integration is pending."
-    };
+    await this.request<unknown>(
+      `/recordings/${encodeURIComponent(filename)}`,
+      {
+        method: "DELETE"
+      },
+      this.recordingRequestTimeoutMs
+    );
   }
 
-  private async request<T>(path: string, init?: RequestInit): Promise<T> {
+  async setBallMachinePower(power: BallMachinePower): Promise<BallMachineStateResponse> {
+    const response = await this.request<unknown>("/ball-machine/state", {
+      method: "POST",
+      body: JSON.stringify({ power })
+    });
+
+    const result = this.toServiceResult(
+      response,
+      power === "on" ? "Ball machine turned on." : "Ball machine turned off."
+    );
+
+    if (
+      this.isRecord(response) &&
+      (response.power === "on" || response.power === "off")
+    ) {
+      return {
+        ...result,
+        power: response.power
+      };
+    }
+
+    return result;
+  }
+
+  private async request<T>(
+    path: string,
+    init?: RequestInit,
+    timeoutMs: number = this.requestTimeoutMs
+  ): Promise<T> {
     const url = this.resolveBackendUrl(path);
     const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), this.requestTimeoutMs);
+    const timeout = setTimeout(() => controller.abort(), timeoutMs);
 
     try {
       const response = await fetch(url, {
@@ -208,7 +270,7 @@ class RaspberryPiService {
       const responseText = await response.text();
 
       if (!response.ok) {
-        throw new Error(`Raspberry Pi request failed with HTTP ${response.status}.`);
+        throw new Error(this.extractHttpErrorMessage(response.status, responseText));
       }
 
       if (responseText.trim().length === 0) {
@@ -229,6 +291,30 @@ class RaspberryPiService {
     } finally {
       clearTimeout(timeout);
     }
+  }
+
+  private extractHttpErrorMessage(status: number, responseText: string): string {
+    if (responseText.trim().length > 0) {
+      try {
+        const parsed = JSON.parse(responseText) as unknown;
+
+        if (this.isRecord(parsed) && typeof parsed.message === "string" && parsed.message.trim()) {
+          return parsed.message.trim();
+        }
+      } catch {
+        // Fall through to generic HTTP error.
+      }
+    }
+
+    return `Raspberry Pi request failed with HTTP ${status}.`;
+  }
+
+  private extractErrorMessage(response: unknown, fallbackMessage: string): string {
+    if (this.isRecord(response) && typeof response.message === "string" && response.message.trim()) {
+      return response.message.trim();
+    }
+
+    return fallbackMessage;
   }
 
   private resolveBackendUrl(path: string): string {
@@ -284,8 +370,12 @@ class RaspberryPiService {
       throw new Error("Ball speed must be between 0 and 250 km/h.");
     }
 
-    if (!Number.isFinite(payload.angle) || payload.angle < 0 || payload.angle > 90) {
-      throw new Error("Launch angle must be between 0 and 90 degrees.");
+    if (!Number.isFinite(payload.elevation) || payload.elevation < 0 || payload.elevation > 90) {
+      throw new Error("Elevation must be between 0 and 90 degrees.");
+    }
+
+    if (!Number.isFinite(payload.spin) || payload.spin < -5000 || payload.spin > 5000) {
+      throw new Error("Spin must be between -5000 and 5000 rpm.");
     }
 
     if (!Number.isFinite(payload.frequency) || payload.frequency < 0 || payload.frequency > 20) {
@@ -320,6 +410,17 @@ class RaspberryPiService {
 
   private getErrorMessage(error: unknown): string {
     return error instanceof Error ? error.message : "Unknown Raspberry Pi communication error.";
+  }
+
+  private getFilenameFromDownloadUrl(downloadUrl: string): string | undefined {
+    try {
+      const url = new URL(downloadUrl, "http://placeholder.local");
+      const pathSegment = url.pathname.split("/").filter(Boolean).pop();
+      return pathSegment && pathSegment.endsWith(".mp4") ? pathSegment : undefined;
+    } catch {
+      const pathSegment = downloadUrl.split("/").filter(Boolean).pop();
+      return pathSegment && pathSegment.endsWith(".mp4") ? pathSegment : undefined;
+    }
   }
 }
 

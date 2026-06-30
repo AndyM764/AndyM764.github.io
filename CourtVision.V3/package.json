@@ -1,6 +1,6 @@
 {
-  "name": "courtvision-v3",
-  "version": "1.0.0",
+  "name": "courtvision-v4",
+  "version": "4.0.0",
   "private": true,
   "main": "App.tsx",
   "scripts": {
