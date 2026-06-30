@@ -122,11 +122,17 @@ Verify only (without redeploying):
 Each script ends with a clear summary:
 
 ```txt
+PASS: Flask started
+PASS: /status OK
+PASS: /info OK
+...
 DEPLOY: PASS
 VERIFY: PASS
 ```
 
-or `FAIL` with failed check details.
+or `FAIL` with endpoint, HTTP status, and response body.
+
+The deploy script asks for confirmation before proceeding and creates a rollback backup at `~/courtvision-backup-YYYYMMDD-HHMMSS` before replacing the live backend.
 
 ## Safe deployment (staged only)
 
