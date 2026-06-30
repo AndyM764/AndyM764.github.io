@@ -84,24 +84,57 @@ Only one state is allowed at a time. Conflicts return:
 
 If download fails, the file remains on the Pi for retry.
 
-## Safe deployment
+## One-command deploy and verify (Mac)
 
-Do not overwrite a working Pi backend without validation:
+From your Mac, with SSH access to the Pi:
 
 ```sh
-cd backend
-chmod +x deploy.sh
-./deploy.sh andy76@<pi-ip> ~/courtvision/backend
+cd /Users/andymannikum/CourtVisionV4/CourtVision.V3/backend
+chmod +x deploy-courtvision-v4.sh verify-courtvision-v4.sh
+./deploy-courtvision-v4.sh andy76@<pi-ip>
 ```
 
-The script:
+This single command:
 
-1. Uploads to a staged directory
-2. Starts the backend on port `5001`
-3. Verifies `/status` returns `ok` and camera lock fields
-4. Promotes staged files only after health check passes
+1. Validates local `backend/app.py`
+2. Uploads to a staged directory on the Pi
+3. Health-checks the staged backend on port `5001`
+4. Promotes files to `~/courtvision/backend`
+5. Stops any old Flask process and starts production Flask on port `5000`
+6. Runs `verify-courtvision-v4.sh` against the Pi
 
-Restart production on port `5000` after promotion.
+Environment overrides:
+
+```sh
+export COURTVISION_BACKEND_DIR=/Users/andymannikum/CourtVisionV4/CourtVision.V3/backend
+export COURTVISION_PI_TARGET=andy76@192.168.1.50
+export COURTVISION_REMOTE_DIR=~/courtvision/backend
+export COURTVISION_PORT=5000
+./deploy-courtvision-v4.sh
+```
+
+Verify only (without redeploying):
+
+```sh
+./verify-courtvision-v4.sh http://<pi-ip>:5000
+```
+
+Each script ends with a clear summary:
+
+```txt
+DEPLOY: PASS
+VERIFY: PASS
+```
+
+or `FAIL` with failed check details.
+
+## Safe deployment (staged only)
+
+The older staged deploy script remains available:
+
+```sh
+./deploy.sh andy76@<pi-ip> ~/courtvision/backend
+```
 
 Set the phone app bootstrap URL:
 
