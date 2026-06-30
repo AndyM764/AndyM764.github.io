@@ -6,7 +6,7 @@ Single Flask backend at `backend/app.py` for the CourtVision mobile app.
 
 - Raspberry Pi 5 with Camera Module
 - `rpicam-vid`
-- `ffmpeg` and `ffprobe`
+- `ffmpeg` (`ffprobe` is optional)
 - Python 3.11+
 
 Install system dependencies:
@@ -35,59 +35,73 @@ The server listens on `0.0.0.0:5000` by default.
 
 ## Architecture
 
-V4 is recording-first:
+V4 is recording-first with atomic camera state:
 
-1. **Recording** uses a dedicated `rpicam-vid | ffmpeg` pipeline that writes a mobile-compatible MP4 directly to a temp directory.
-2. **Preview** uses a separate HLS pipeline when preview is enabled.
-3. Only one pipeline can use the camera at a time.
+| State | Meaning |
+|-------|---------|
+| `IDLE` | Camera not in use |
+| `PREVIEW` | HLS preview pipeline active |
+| `RECORDING` | Direct MP4 recording pipeline active |
 
-Recordings are stored temporarily in `/tmp/courtvision-recordings` by default. The phone downloads the MP4 and then calls `DELETE /recordings/<filename>` so files are not kept on the Pi.
+Only one state is allowed at a time. Conflicts return:
+
+```json
+{
+  "success": false,
+  "message": "Camera is currently in use by another process"
+}
+```
+
+## Safety guarantees
+
+- **Camera lock** is enforced in the backend, not the app.
+- **Recording deletion** only happens after the phone confirms a successful download via `DELETE /recordings/<filename>` with `{"downloaded": true}`.
+- **ffprobe** is optional. Recording success requires a non-empty MP4 file.
+- **Single backend**: startup fails if `camera_server.py` or duplicate `app.py` files exist.
+- **Safe deploy**: use `deploy.sh` to health-check staged backend before promotion.
 
 ## Endpoints
 
 | Method | Path | Purpose |
 |--------|------|---------|
 | GET | `/info` | Pi hostname and IP for discovery |
-| GET | `/status` | Health plus camera/recording/ball machine state |
-| POST | `/data` | Receive tennis parameters (speed, elevation, spin, frequency) |
+| GET | `/status` | Health, `cameraState`, and consistency check |
+| POST | `/data` | Receive tennis parameters |
 | POST | `/ball-machine/state` | Turn ball machine on or off |
 | POST | `/camera/state` | Enable or disable HLS preview |
 | GET | `/camera/stream.m3u8` | HLS playlist for Expo preview |
 | POST | `/recording/start` | Start direct MP4 recording |
 | POST | `/recording/stop` | Finalize MP4 and return download URL |
 | GET | `/recordings/<filename>.mp4` | Download recording to phone |
-| DELETE | `/recordings/<filename>.mp4` | Remove temp file from Pi |
+| DELETE | `/recordings/<filename>.mp4` | Remove temp file after confirmed download |
 
-## Recording
+## Recording flow
 
-`POST /recording/start` starts `rpicam-vid` piped into `ffmpeg`, which encodes H.264 baseline video with `yuv420p` and `+faststart` for iOS and Android playback.
+1. `POST /recording/start` → Pi records to temp directory
+2. `POST /recording/stop` → MP4 finalized (file must exist with size > 0)
+3. `GET /recordings/<filename>` → phone downloads MP4
+4. `DELETE /recordings/<filename>` with `{"downloaded": true}` → Pi deletes file
 
-`POST /recording/stop` closes the pipeline, validates the MP4 with `ffprobe`, and returns a download URL.
+If download fails, the file remains on the Pi for retry.
 
-Stop camera preview before starting a recording.
+## Safe deployment
 
-## Camera preview
-
-`POST /camera/state` with `{"enabled": true}` starts low-latency HLS preview.
-
-`GET /camera/stream.m3u8` is consumed by `expo-video` in Expo Go.
-
-Default low-latency settings:
-
-```txt
-COURTVISION_HLS_SEGMENT_SECONDS=0.5
-COURTVISION_HLS_LIST_SIZE=3
-COURTVISION_CAMERA_INTRA_PERIOD=15
-```
-
-## Deployment
-
-Copy the backend to the Pi and restart Flask:
+Do not overwrite a working Pi backend without validation:
 
 ```sh
-scp -r backend/ andy76@<pi-ip>:~/courtvision/backend/
-ssh andy76@<pi-ip> "cd ~/courtvision/backend && . .venv/bin/activate && python app.py"
+cd backend
+chmod +x deploy.sh
+./deploy.sh andy76@<pi-ip> ~/courtvision/backend
 ```
+
+The script:
+
+1. Uploads to a staged directory
+2. Starts the backend on port `5001`
+3. Verifies `/status` returns `ok` and camera lock fields
+4. Promotes staged files only after health check passes
+
+Restart production on port `5000` after promotion.
 
 Set the phone app bootstrap URL:
 

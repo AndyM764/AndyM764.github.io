@@ -41,8 +41,10 @@ export function useRecordingState(): UseRecordingStateResult {
     setRecordingState("saving");
     setErrorMessage(null);
 
+    const activeRecordingId = recordingId;
+
     try {
-      const stopResponse = await raspberryPiService.stopRecording(recordingId);
+      const stopResponse = await raspberryPiService.stopRecording(activeRecordingId);
       const savedVideo = await raspberryPiService.downloadRecording(
         stopResponse.downloadUrl,
         stopResponse.filename
@@ -51,6 +53,16 @@ export function useRecordingState(): UseRecordingStateResult {
       setLastSavedVideoPath(savedVideo.path);
       setRecordingId(null);
       setRecordingState("idle");
+
+      if (stopResponse.filename) {
+        try {
+          await raspberryPiService.deleteRecordingFromPiAfterSuccessfulDownload(
+            stopResponse.filename
+          );
+        } catch {
+          // Keep the saved phone file. The Pi copy remains available for retry deletion.
+        }
+      }
     } catch (error) {
       setRecordingState("idle");
       setErrorMessage(error instanceof Error ? error.message : "Unable to stop recording.");

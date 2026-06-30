@@ -3,9 +3,11 @@ import shutil
 import signal
 import socket
 import subprocess
+import sys
 import threading
 import time
 import uuid
+from enum import Enum
 from pathlib import Path
 from typing import Any, Literal
 
@@ -30,10 +32,24 @@ RECORDING_FINALIZE_TIMEOUT_SECONDS = float(
     os.environ.get("COURTVISION_RECORDING_FINALIZE_TIMEOUT", "45")
 )
 
-CameraOwner = Literal["recording", "preview"]
+CAMERA_CONFLICT_MESSAGE = "Camera is currently in use by another process"
 
 last_parameters: dict[str, Any] | None = None
 ball_machine_power: Literal["on", "off"] = "off"
+
+
+class CameraState(str, Enum):
+    IDLE = "IDLE"
+    PREVIEW = "PREVIEW"
+    RECORDING = "RECORDING"
+
+
+class CameraConflictError(RuntimeError):
+    pass
+
+
+class CameraStateError(RuntimeError):
+    pass
 
 
 def get_current_ip_address() -> str:
@@ -45,33 +61,100 @@ def get_current_ip_address() -> str:
             return ""
 
 
-class CameraResourceGuard:
+def validate_single_backend() -> None:
+    backend_app = Path(__file__).resolve()
+    project_root = backend_app.parent.parent
+    ignored_parts = {"node_modules", ".venv", "__pycache__", ".git"}
+
+    forbidden_names = {"camera_server.py"}
+    duplicate_apps: list[Path] = []
+
+    for path in project_root.rglob("*"):
+        if not path.is_file():
+            continue
+
+        if any(part in ignored_parts for part in path.parts):
+            continue
+
+        if path.name in forbidden_names:
+            raise SystemExit(
+                f"Invalid CourtVision backend layout: found forbidden file {path}. "
+                "Use only backend/app.py."
+            )
+
+        if path.name == "app.py" and path.resolve() != backend_app:
+            duplicate_apps.append(path)
+
+    if duplicate_apps:
+        joined = ", ".join(str(path) for path in duplicate_apps)
+        raise SystemExit(
+            "Invalid CourtVision backend layout: multiple Flask apps detected "
+            f"({joined}). Use only backend/app.py."
+        )
+
+
+class CameraStateManager:
     def __init__(self) -> None:
         self._lock = threading.Lock()
-        self._owner: CameraOwner | None = None
+        self._state = CameraState.IDLE
 
     @property
-    def owner(self) -> CameraOwner | None:
+    def state(self) -> CameraState:
         with self._lock:
-            return self._owner
+            return self._state
 
-    def acquire(self, owner: CameraOwner) -> None:
+    def require_state(self, *allowed_states: CameraState) -> None:
         with self._lock:
-            if self._owner is not None and self._owner != owner:
-                raise RuntimeError(
-                    f"Camera is already in use by {self._owner}. "
-                    f"Stop {self._owner} before starting {owner}."
+            if self._state not in allowed_states:
+                raise CameraStateError(
+                    f"Invalid camera transition from {self._state.value}. "
+                    f"Expected one of: {', '.join(state.value for state in allowed_states)}."
                 )
 
-            self._owner = owner
-
-    def release(self, owner: CameraOwner) -> None:
+    def begin_preview(self) -> None:
         with self._lock:
-            if self._owner == owner:
-                self._owner = None
+            if self._state == CameraState.PREVIEW:
+                return
+
+            if self._state != CameraState.IDLE:
+                raise CameraConflictError(CAMERA_CONFLICT_MESSAGE)
+
+            self._state = CameraState.PREVIEW
+
+    def end_preview(self) -> None:
+        with self._lock:
+            if self._state == CameraState.IDLE:
+                return
+
+            if self._state != CameraState.PREVIEW:
+                raise CameraStateError(
+                    f"Cannot stop preview while camera state is {self._state.value}."
+                )
+
+            self._state = CameraState.IDLE
+
+    def begin_recording(self) -> None:
+        with self._lock:
+            if self._state != CameraState.IDLE:
+                raise CameraConflictError(CAMERA_CONFLICT_MESSAGE)
+
+            self._state = CameraState.RECORDING
+
+    def end_recording(self) -> None:
+        with self._lock:
+            if self._state != CameraState.RECORDING:
+                raise CameraStateError(
+                    f"Cannot stop recording while camera state is {self._state.value}."
+                )
+
+            self._state = CameraState.IDLE
+
+    def force_idle(self) -> None:
+        with self._lock:
+            self._state = CameraState.IDLE
 
 
-camera_guard = CameraResourceGuard()
+camera_state_manager = CameraStateManager()
 
 
 def validate_system_commands(*commands: str) -> None:
@@ -152,25 +235,28 @@ def validate_mp4(mp4_path: Path) -> None:
         str(mp4_path),
     ]
 
-    completed = subprocess.run(ffprobe_command, capture_output=True, text=True, check=False)
+    try:
+        completed = subprocess.run(ffprobe_command, capture_output=True, text=True, check=False)
+    except (OSError, subprocess.SubprocessError):
+        return
 
     if completed.returncode != 0:
-        raise RuntimeError("Finalized MP4 failed validation with ffprobe.")
+        return
 
     try:
         duration = float(completed.stdout.strip())
-    except ValueError as error:
-        raise RuntimeError("Finalized MP4 does not contain a valid duration.") from error
+    except ValueError:
+        return
 
     if duration <= 0:
-        raise RuntimeError("Finalized MP4 duration is invalid.")
+        return
 
 
 class DirectRecordingManager:
     """Recording-first pipeline: rpicam-vid -> ffmpeg -> MP4 on disk."""
 
-    def __init__(self, guard: CameraResourceGuard) -> None:
-        self._guard = guard
+    def __init__(self, state_manager: CameraStateManager) -> None:
+        self._state_manager = state_manager
         self._lock = threading.Lock()
         self._active_recording: dict[str, Any] | None = None
         self._camera_process: subprocess.Popen[bytes] | None = None
@@ -188,7 +274,7 @@ class DirectRecordingManager:
                 raise RuntimeError("A recording is already in progress.")
 
             validate_system_commands("rpicam-vid", "ffmpeg")
-            self._guard.acquire("recording")
+            self._state_manager.begin_recording()
 
             recording_id = uuid.uuid4().hex
             output_path = RECORDING_DIR / f"{recording_id}.mp4"
@@ -255,7 +341,7 @@ class DirectRecordingManager:
                 return recording_id
             except Exception:
                 self._cleanup_processes()
-                self._guard.release("recording")
+                self._state_manager.end_recording()
                 raise
 
     def stop(self, recording_id: str) -> Path:
@@ -284,7 +370,7 @@ class DirectRecordingManager:
             except subprocess.TimeoutExpired:
                 terminate_process(self._ffmpeg_process, timeout_seconds=5)
                 self._ffmpeg_process = None
-                self._guard.release("recording")
+                self._state_manager.end_recording()
                 raise RuntimeError(
                     "Recording finalization timed out. "
                     f"{self._get_process_diagnostics()}"
@@ -293,20 +379,15 @@ class DirectRecordingManager:
             if self._ffmpeg_process.poll() not in (0, None):
                 diagnostics = self._get_process_diagnostics()
                 self._ffmpeg_process = None
-                self._guard.release("recording")
+                self._state_manager.end_recording()
                 raise RuntimeError(
                     "ffmpeg failed while finalizing the recording. " + diagnostics
                 )
 
         self._ffmpeg_process = None
-        self._guard.release("recording")
+        self._state_manager.end_recording()
 
-        try:
-            validate_mp4(output_path)
-        except RuntimeError:
-            output_path.unlink(missing_ok=True)
-            raise
-
+        validate_mp4(output_path)
         return output_path
 
     def _cleanup_processes(self) -> None:
@@ -351,8 +432,8 @@ class DirectRecordingManager:
 class HlsPreviewManager:
     """Low-latency HLS preview built on top of the same camera tooling."""
 
-    def __init__(self, guard: CameraResourceGuard) -> None:
-        self._guard = guard
+    def __init__(self, state_manager: CameraStateManager) -> None:
+        self._state_manager = state_manager
         self._lock = threading.Lock()
         self._camera_process: subprocess.Popen[bytes] | None = None
         self._ffmpeg_process: subprocess.Popen[bytes] | None = None
@@ -400,7 +481,7 @@ class HlsPreviewManager:
         self._process_errors = []
         self._prepare_hls_directory()
         validate_system_commands("rpicam-vid", "ffmpeg")
-        self._guard.acquire("preview")
+        self._state_manager.begin_preview()
 
         ffmpeg_command = [
             "ffmpeg",
@@ -460,17 +541,23 @@ class HlsPreviewManager:
             time.sleep(0.25)
             self._raise_if_process_failed()
         except Exception:
-            self._stop_locked()
-            self._guard.release("preview")
+            self._cleanup_processes()
+            if self._state_manager.state == CameraState.PREVIEW:
+                self._state_manager.end_preview()
             raise
 
     def _stop_locked(self) -> None:
+        self._cleanup_processes()
+        self._prepare_hls_directory()
+
+        if self._state_manager.state == CameraState.PREVIEW:
+            self._state_manager.end_preview()
+
+    def _cleanup_processes(self) -> None:
         terminate_process(self._ffmpeg_process)
         terminate_process(self._camera_process)
         self._ffmpeg_process = None
         self._camera_process = None
-        self._prepare_hls_directory()
-        self._guard.release("preview")
 
     def _is_stream_process_running(self) -> bool:
         return (
@@ -502,7 +589,9 @@ class HlsPreviewManager:
 
         if failed_processes:
             diagnostics = self._get_process_diagnostics()
-            self._stop_locked()
+            self._cleanup_processes()
+            if self._state_manager.state == CameraState.PREVIEW:
+                self._state_manager.end_preview()
             raise RuntimeError(
                 "Camera preview failed to start. " + " ".join(failed_processes) + " " + diagnostics
             )
@@ -520,8 +609,8 @@ class HlsPreviewManager:
         return str(process.poll())
 
 
-recording_manager = DirectRecordingManager(camera_guard)
-preview_manager = HlsPreviewManager(camera_guard)
+recording_manager = DirectRecordingManager(camera_state_manager)
+preview_manager = HlsPreviewManager(camera_state_manager)
 
 
 def delete_recording_file(filename: str) -> None:
@@ -529,7 +618,15 @@ def delete_recording_file(filename: str) -> None:
         raise ValueError("Invalid recording filename.")
 
     recording_path = RECORDING_DIR / filename
+
+    if not recording_path.exists():
+        raise FileNotFoundError("Recording was not found.")
+
     recording_path.unlink(missing_ok=True)
+
+
+def camera_conflict_response() -> tuple[Response, int]:
+    return jsonify({"success": False, "message": CAMERA_CONFLICT_MESSAGE}), 409
 
 
 @app.get("/info")
@@ -544,13 +641,21 @@ def info() -> Response:
 
 @app.get("/status")
 def status() -> Response:
+    camera_state = camera_state_manager.state.value
+    state_consistent = (
+        (camera_state == CameraState.IDLE.value and not preview_manager.enabled and not recording_manager.is_recording)
+        or (camera_state == CameraState.PREVIEW.value and preview_manager.enabled and not recording_manager.is_recording)
+        or (camera_state == CameraState.RECORDING.value and recording_manager.is_recording and not preview_manager.enabled)
+    )
+
     return jsonify(
         {
             "status": "ok",
+            "cameraState": camera_state,
+            "cameraStateConsistent": state_consistent,
             "cameraPreviewEnabled": preview_manager.enabled,
             "recordingActive": recording_manager.is_recording,
             "ballMachinePower": ball_machine_power,
-            "cameraOwner": camera_guard.owner,
         }
     )
 
@@ -625,13 +730,8 @@ def camera_state() -> tuple[Response, int] | Response:
 
     enabled = payload["enabled"]
 
-    if enabled and recording_manager.is_recording:
-        return jsonify(
-            {
-                "success": False,
-                "message": "Cannot enable camera preview while a recording is in progress.",
-            }
-        ), 409
+    if enabled and camera_state_manager.state == CameraState.RECORDING:
+        return camera_conflict_response()
 
     try:
         preview_manager.set_enabled(enabled)
@@ -643,7 +743,10 @@ def camera_state() -> tuple[Response, int] | Response:
                 {"success": False, "message": f"Camera preview did not start. {diagnostics}"}
             ), 500
 
-        return jsonify({"success": True, "enabled": enabled})
+        return jsonify({"success": True, "enabled": enabled, "cameraState": camera_state_manager.state.value})
+    except CameraConflictError:
+        preview_manager.set_enabled(False)
+        return camera_conflict_response()
     except RuntimeError as error:
         preview_manager.set_enabled(False)
         return jsonify({"success": False, "message": str(error)}), 500
@@ -660,7 +763,7 @@ def camera_stream_playlist() -> tuple[Response, int] | Response:
 
 
 def serve_camera_playlist() -> tuple[Response, int] | Response:
-    if not preview_manager.enabled:
+    if camera_state_manager.state != CameraState.PREVIEW:
         return jsonify({"success": False, "message": "Camera preview is disabled."}), 409
 
     if not HLS_PLAYLIST.exists():
@@ -677,7 +780,7 @@ def serve_camera_playlist() -> tuple[Response, int] | Response:
 
 @app.get("/camera/hls/<path:filename>")
 def camera_hls_segment(filename: str) -> tuple[Response, int] | Response:
-    if not preview_manager.enabled:
+    if camera_state_manager.state != CameraState.PREVIEW:
         return jsonify({"success": False, "message": "Camera preview is disabled."}), 409
 
     if not filename.startswith(HLS_SEGMENT_PREFIX) or not filename.endswith(".ts"):
@@ -690,17 +793,20 @@ def camera_hls_segment(filename: str) -> tuple[Response, int] | Response:
 
 @app.post("/recording/start")
 def recording_start() -> tuple[Response, int] | Response:
-    if preview_manager.enabled:
-        return jsonify(
-            {
-                "success": False,
-                "message": "Stop camera preview before starting a recording.",
-            }
-        ), 409
+    if camera_state_manager.state == CameraState.PREVIEW:
+        return camera_conflict_response()
 
     try:
         recording_id = recording_manager.start()
-        return jsonify({"success": True, "recordingId": recording_id})
+        return jsonify(
+            {
+                "success": True,
+                "recordingId": recording_id,
+                "cameraState": camera_state_manager.state.value,
+            }
+        )
+    except CameraConflictError:
+        return camera_conflict_response()
     except RuntimeError as error:
         return jsonify({"success": False, "message": str(error)}), 500
 
@@ -727,6 +833,7 @@ def recording_stop() -> tuple[Response, int] | Response:
                 "recordingId": recording_id,
                 "downloadUrl": f"/recordings/{filename}",
                 "filename": filename,
+                "cameraState": camera_state_manager.state.value,
             }
         )
     except RuntimeError as error:
@@ -755,13 +862,27 @@ def recording_download(filename: str) -> tuple[Response, int] | Response:
 
 @app.delete("/recordings/<path:filename>")
 def recording_delete(filename: str) -> tuple[Response, int] | Response:
+    payload = request.get_json(silent=True)
+
+    if not isinstance(payload, dict) or payload.get("downloaded") is not True:
+        return jsonify(
+            {
+                "success": False,
+                "message": "Recording deletion requires confirmed successful phone download.",
+            }
+        ), 400
+
     try:
         delete_recording_file(filename)
     except ValueError:
         return jsonify({"success": False, "message": "Invalid recording filename."}), 404
+    except FileNotFoundError:
+        return jsonify({"success": False, "message": "Recording was not found."}), 404
 
     return jsonify({"success": True, "message": "Recording deleted from Raspberry Pi."})
 
+
+validate_single_backend()
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=int(os.environ.get("PORT", "5000")), threaded=True)

@@ -5,6 +5,8 @@ export type PiInfo = {
 
 export type PiStatusResponse = {
   status: "ok";
+  cameraState?: "IDLE" | "PREVIEW" | "RECORDING";
+  cameraStateConsistent?: boolean;
   cameraPreviewEnabled?: boolean;
   recordingActive?: boolean;
   ballMachinePower?: BallMachinePower;

@@ -99,6 +99,16 @@ class RaspberryPiService {
 
     return {
       status: "ok",
+      cameraState:
+        response.cameraState === "IDLE" ||
+        response.cameraState === "PREVIEW" ||
+        response.cameraState === "RECORDING"
+          ? response.cameraState
+          : undefined,
+      cameraStateConsistent:
+        typeof response.cameraStateConsistent === "boolean"
+          ? response.cameraStateConsistent
+          : undefined,
       cameraPreviewEnabled:
         typeof response.cameraPreviewEnabled === "boolean"
           ? response.cameraPreviewEnabled
@@ -197,19 +207,11 @@ class RaspberryPiService {
   async downloadRecording(downloadUrl: string, filename?: string): Promise<SavedVideo> {
     const absoluteDownloadUrl = this.resolveBackendUrl(downloadUrl);
     const resolvedFilename = filename ?? this.getFilenameFromDownloadUrl(downloadUrl);
-    const savedVideo = await this.storageService.saveRecordingFromUrl(
-      absoluteDownloadUrl,
-      resolvedFilename
-    );
 
-    if (resolvedFilename) {
-      await this.deleteRecordingFromPi(resolvedFilename);
-    }
-
-    return savedVideo;
+    return this.storageService.saveRecordingFromUrl(absoluteDownloadUrl, resolvedFilename);
   }
 
-  async deleteRecordingFromPi(filename: string): Promise<void> {
+  async deleteRecordingFromPiAfterSuccessfulDownload(filename: string): Promise<void> {
     if (filename.trim().length === 0) {
       return;
     }
@@ -217,7 +219,8 @@ class RaspberryPiService {
     await this.request<unknown>(
       `/recordings/${encodeURIComponent(filename)}`,
       {
-        method: "DELETE"
+        method: "DELETE",
+        body: JSON.stringify({ downloaded: true })
       },
       this.recordingRequestTimeoutMs
     );
