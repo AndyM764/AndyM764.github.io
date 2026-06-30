@@ -44,23 +44,21 @@ def get_current_ip_address() -> str:
 class CameraStreamManager:
     def __init__(self) -> None:
         self._lock = threading.Lock()
-        self._enabled = False
         self._camera_process: subprocess.Popen[bytes] | None = None
         self._ffmpeg_process: subprocess.Popen[bytes] | None = None
+        self._process_errors: list[str] = []
 
     @property
     def enabled(self) -> bool:
         with self._lock:
-            return self._enabled and self._is_stream_process_running()
+            return self._is_stream_process_running()
 
     def set_enabled(self, enabled: bool) -> None:
         with self._lock:
             if enabled:
                 self._start_locked()
-                self._enabled = True
                 return
 
-            self._enabled = False
             self._stop_locked()
 
     def ensure_playlist_ready(self, timeout_seconds: float) -> bool:
@@ -70,8 +68,11 @@ class CameraStreamManager:
             if HLS_PLAYLIST.exists() and HLS_PLAYLIST.stat().st_size > 0:
                 return True
 
-            if not self.enabled:
-                return False
+            if not self._is_stream_process_running():
+                raise RuntimeError(
+                    "Camera pipeline stopped before the HLS playlist was ready. "
+                    f"{self._get_process_diagnostics()}"
+                )
 
             time.sleep(0.1)
 
@@ -98,11 +99,16 @@ class CameraStreamManager:
 
         return sorted(segment_files, key=lambda item: item[0])
 
+    def get_diagnostics(self) -> str:
+        with self._lock:
+            return self._get_process_diagnostics()
+
     def _start_locked(self) -> None:
         if self._is_stream_process_running():
             return
 
         self._stop_locked()
+        self._process_errors = []
         self._prepare_hls_directory()
         self._validate_system_commands()
 
@@ -163,8 +169,9 @@ class CameraStreamManager:
         self._camera_process = subprocess.Popen(
             camera_command,
             stdout=subprocess.PIPE,
-            stderr=subprocess.DEVNULL,
+            stderr=subprocess.PIPE,
         )
+        self._capture_stderr("rpicam-vid", self._camera_process)
 
         if self._camera_process.stdout is None:
             self._stop_locked()
@@ -175,10 +182,13 @@ class CameraStreamManager:
             cwd=HLS_DIRECTORY,
             stdin=self._camera_process.stdout,
             stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
+            stderr=subprocess.PIPE,
         )
+        self._capture_stderr("ffmpeg", self._ffmpeg_process)
 
         self._camera_process.stdout.close()
+        time.sleep(0.25)
+        self._raise_if_process_failed()
 
     def _stop_locked(self) -> None:
         self._terminate_process(self._ffmpeg_process)
@@ -208,6 +218,48 @@ class CameraStreamManager:
 
         if shutil.which("ffmpeg") is None:
             raise RuntimeError("ffmpeg is not installed or not available on PATH.")
+
+    def _capture_stderr(self, name: str, process: subprocess.Popen[bytes]) -> None:
+        if process.stderr is None:
+            return
+
+        def read_stderr() -> None:
+            assert process.stderr is not None
+
+            for raw_line in iter(process.stderr.readline, b""):
+                line = raw_line.decode("utf-8", errors="replace").strip()
+
+                if line:
+                    self._process_errors.append(f"{name}: {line}")
+                    self._process_errors = self._process_errors[-20:]
+
+        threading.Thread(target=read_stderr, daemon=True).start()
+
+    def _raise_if_process_failed(self) -> None:
+        failed_processes: list[str] = []
+
+        if self._camera_process is None or self._camera_process.poll() is not None:
+            failed_processes.append(f"rpicam-vid exited with code {self._get_return_code(self._camera_process)}")
+
+        if self._ffmpeg_process is None or self._ffmpeg_process.poll() is not None:
+            failed_processes.append(f"ffmpeg exited with code {self._get_return_code(self._ffmpeg_process)}")
+
+        if failed_processes:
+            diagnostics = self._get_process_diagnostics()
+            self._stop_locked()
+            raise RuntimeError("Camera pipeline failed to start. " + " ".join(failed_processes) + " " + diagnostics)
+
+    def _get_process_diagnostics(self) -> str:
+        if not self._process_errors:
+            return "No process error output was captured."
+
+        return "Recent process output: " + " | ".join(self._process_errors[-8:])
+
+    def _get_return_code(self, process: subprocess.Popen[bytes] | None) -> str:
+        if process is None:
+            return "not started"
+
+        return str(process.poll())
 
     def _parse_segment_index(self, path: Path) -> int | None:
         if not path.name.startswith(HLS_SEGMENT_PREFIX) or not path.name.endswith(".ts"):
@@ -438,8 +490,9 @@ def camera_state() -> tuple[Response, int] | Response:
         camera_stream_manager.set_enabled(enabled)
 
         if enabled and not camera_stream_manager.ensure_playlist_ready(CAMERA_START_TIMEOUT_SECONDS):
+            diagnostics = camera_stream_manager.get_diagnostics()
             camera_stream_manager.set_enabled(False)
-            return jsonify({"success": False, "message": "Camera stream did not start."}), 500
+            return jsonify({"success": False, "message": f"Camera stream did not start. {diagnostics}"}), 500
 
         return jsonify({"success": True})
     except RuntimeError as error:
