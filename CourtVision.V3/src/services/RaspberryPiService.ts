@@ -211,15 +211,28 @@ class RaspberryPiService {
       downloadUrl: response.downloadUrl.trim(),
       filename: typeof response.filename === "string" ? response.filename : undefined,
       fileSize: response.fileSize,
+      recordingDurationSeconds:
+        typeof response.recordingDurationSeconds === "number"
+          ? response.recordingDurationSeconds
+          : undefined,
+      validation: this.parseRecordingValidation(response.validation),
       message: typeof response.message === "string" ? response.message : undefined
     };
   }
 
-  async downloadRecording(downloadUrl: string, filename?: string): Promise<SavedVideo> {
+  async downloadRecording(
+    downloadUrl: string,
+    filename?: string,
+    expectedFileSize?: number
+  ): Promise<SavedVideo> {
     const absoluteDownloadUrl = this.resolveBackendUrl(downloadUrl);
     const resolvedFilename = filename ?? this.getFilenameFromDownloadUrl(downloadUrl);
 
-    return this.storageService.saveRecordingFromUrl(absoluteDownloadUrl, resolvedFilename);
+    return this.storageService.saveRecordingFromUrl(
+      absoluteDownloadUrl,
+      resolvedFilename,
+      expectedFileSize
+    );
   }
 
   async deleteRecordingFromPiAfterSuccessfulDownload(filename: string): Promise<void> {
@@ -424,6 +437,31 @@ class RaspberryPiService {
 
   private getErrorMessage(error: unknown): string {
     return error instanceof Error ? error.message : "Unknown Raspberry Pi communication error.";
+  }
+
+  private parseRecordingValidation(value: unknown): StopRecordingResponse["validation"] {
+    if (!this.isRecord(value)) {
+      return undefined;
+    }
+
+    if (typeof value.fileExists !== "boolean" || typeof value.passed !== "boolean") {
+      return undefined;
+    }
+
+    if (typeof value.fileSize !== "number" || typeof value.ffprobeAvailable !== "boolean") {
+      return undefined;
+    }
+
+    return {
+      fileExists: value.fileExists,
+      fileSize: value.fileSize,
+      ffprobeAvailable: value.ffprobeAvailable,
+      duration: typeof value.duration === "number" ? value.duration : null,
+      validVideoStream:
+        typeof value.validVideoStream === "boolean" ? value.validVideoStream : null,
+      passed: value.passed,
+      warning: typeof value.warning === "string" ? value.warning : undefined
+    };
   }
 
   private getFilenameFromDownloadUrl(downloadUrl: string): string | undefined {

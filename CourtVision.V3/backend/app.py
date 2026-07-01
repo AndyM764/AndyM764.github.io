@@ -1,3 +1,4 @@
+import json
 import logging
 import os
 import shutil
@@ -38,6 +39,18 @@ HLS_SEGMENT_SECONDS = os.environ.get("COURTVISION_HLS_SEGMENT_SECONDS", "0.5")
 HLS_LIST_SIZE = os.environ.get("COURTVISION_HLS_LIST_SIZE", "3")
 RECORDING_FINALIZE_TIMEOUT_SECONDS = float(
     os.environ.get("COURTVISION_RECORDING_FINALIZE_TIMEOUT", "45")
+)
+RECORDING_WATCHDOG_SECONDS = float(os.environ.get("COURTVISION_RECORDING_WATCHDOG_SECONDS", "2"))
+RECORDING_FILE_STABLE_INTERVAL_SECONDS = float(
+    os.environ.get("COURTVISION_RECORDING_FILE_STABLE_INTERVAL", "0.5")
+)
+RECORDING_FILE_STABLE_CHECKS = int(os.environ.get("COURTVISION_RECORDING_FILE_STABLE_CHECKS", "3"))
+RECORDING_FILE_STABLE_TIMEOUT_SECONDS = float(
+    os.environ.get("COURTVISION_RECORDING_FILE_STABLE_TIMEOUT", "15")
+)
+MIN_MP4_SIZE_WITHOUT_FFPROBE = int(os.environ.get("COURTVISION_MIN_MP4_SIZE_WITHOUT_FFPROBE", str(100 * 1024)))
+ACTIVE_RECORDING_STATE_FILE = Path(
+    os.environ.get("COURTVISION_ACTIVE_RECORDING_STATE_FILE", "/tmp/courtvision-active-recording.json")
 )
 
 CAMERA_CONFLICT_MESSAGE = "Camera is currently in use by another process"
@@ -171,6 +184,121 @@ def validate_system_commands(*commands: str) -> None:
             raise RuntimeError(f"{command} is not installed or not available on PATH.")
 
 
+def verify_camera_available() -> None:
+    validate_system_commands("rpicam-vid")
+
+    camera_list_commands = [
+        ["rpicam-hello", "--list-cameras"],
+        ["rpicam-vid", "--list-cameras"],
+    ]
+
+    for command in camera_list_commands:
+        if shutil.which(command[0]) is None:
+            continue
+
+        try:
+            completed = subprocess.run(
+                command,
+                capture_output=True,
+                text=True,
+                timeout=10,
+                check=False,
+            )
+        except (OSError, subprocess.SubprocessError) as error:
+            raise RuntimeError(
+                f"Unable to query Raspberry Pi camera availability using {command[0]}: {error}"
+            ) from error
+
+        output = f"{completed.stdout}\n{completed.stderr}".strip()
+        lowered = output.lower()
+
+        if completed.returncode != 0:
+            continue
+
+        if "no cameras available" in lowered:
+            raise RuntimeError(
+                "Raspberry Pi camera is not detected. Connect Camera Module 3 and reboot if needed."
+            )
+
+        if "available cameras" in lowered or "imx" in lowered or "/base/" in lowered:
+            logger.info("Camera detected via %s: %s", command[0], output.replace("\n", " | "))
+            return
+
+        if len(output) > 0:
+            logger.info("Camera detected via %s.", command[0])
+            return
+
+    raise RuntimeError(
+        "Raspberry Pi camera is not detected. Verify Camera Module 3 is connected and enabled."
+    )
+
+
+def wait_for_file_stable(mp4_path: Path, timeout_seconds: float = RECORDING_FILE_STABLE_TIMEOUT_SECONDS) -> int:
+    deadline = time.monotonic() + timeout_seconds
+    stable_count = 0
+    last_size = -1
+
+    while time.monotonic() < deadline:
+        if not mp4_path.exists():
+            time.sleep(RECORDING_FILE_STABLE_INTERVAL_SECONDS)
+            continue
+
+        size = mp4_path.stat().st_size
+        if size == last_size:
+            stable_count += 1
+            if stable_count >= RECORDING_FILE_STABLE_CHECKS:
+                logger.info(
+                    "Recording file stabilized path=%s size=%d bytes",
+                    mp4_path,
+                    size,
+                )
+                return size
+        else:
+            stable_count = 0
+            last_size = size
+
+        time.sleep(RECORDING_FILE_STABLE_INTERVAL_SECONDS)
+
+    raise RuntimeError(
+        f"Recording file did not finish writing to disk at {mp4_path} within {timeout_seconds} seconds."
+    )
+
+
+def persist_active_recording_state(payload: dict[str, Any]) -> None:
+    ACTIVE_RECORDING_STATE_FILE.write_text(json.dumps(payload), encoding="utf-8")
+
+
+def clear_active_recording_state() -> None:
+    ACTIVE_RECORDING_STATE_FILE.unlink(missing_ok=True)
+
+
+def terminate_orphan_recording_processes() -> None:
+    if not ACTIVE_RECORDING_STATE_FILE.exists():
+        return
+
+    try:
+        payload = json.loads(ACTIVE_RECORDING_STATE_FILE.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        logger.warning("Unable to read active recording state file for orphan recovery.")
+        ACTIVE_RECORDING_STATE_FILE.unlink(missing_ok=True)
+        return
+
+    for pid_key in ("cameraPid", "ffmpegPid"):
+        pid = payload.get(pid_key)
+        if not isinstance(pid, int):
+            continue
+
+        try:
+            os.kill(pid, signal.SIGTERM)
+            logger.warning("Terminated orphan recording process %s=%s", pid_key, pid)
+        except ProcessLookupError:
+            logger.info("Orphan recording process already exited %s=%s", pid_key, pid)
+        except OSError as error:
+            logger.warning("Unable to terminate orphan recording process %s=%s: %s", pid_key, pid, error)
+
+    clear_active_recording_state()
+
+
 def build_rpicam_command() -> list[str]:
     return [
         "rpicam-vid",
@@ -241,9 +369,19 @@ def validate_mp4(mp4_path: Path) -> dict[str, Any]:
     }
 
     if not result["ffprobeAvailable"]:
+        if file_size < MIN_MP4_SIZE_WITHOUT_FFPROBE:
+            raise RuntimeError(
+                "Recording file is too small for validation without ffprobe: "
+                f"{file_size} bytes (minimum {MIN_MP4_SIZE_WITHOUT_FFPROBE} bytes)."
+            )
+
+        result["warning"] = (
+            "ffprobe is not installed; validated file existence and minimum size only."
+        )
         logger.warning(
-            "ffprobe is not installed; MP4 validation used file existence and size only for %s",
+            "ffprobe unavailable; MP4 passed size-only validation for %s (%d bytes)",
             mp4_path,
+            file_size,
         )
         return result
 
@@ -334,6 +472,8 @@ class DirectRecordingManager:
             return self._active_recording is not None
 
     def recover_orphans(self) -> None:
+        terminate_orphan_recording_processes()
+
         with self._lock:
             if self._active_recording is None and not self._processes_running_unlocked():
                 if self._state_manager.state == CameraState.RECORDING:
@@ -348,6 +488,7 @@ class DirectRecordingManager:
                 )
                 self._active_recording = None
                 self._cleanup_processes_unlocked()
+                clear_active_recording_state()
                 if self._state_manager.state == CameraState.RECORDING:
                     self._state_manager.force_idle()
 
@@ -369,6 +510,7 @@ class DirectRecordingManager:
             self._stopping = False
 
         self._cleanup_processes()
+        clear_active_recording_state()
 
         if self._state_manager.state == CameraState.RECORDING:
             self._state_manager.force_idle()
@@ -381,11 +523,13 @@ class DirectRecordingManager:
             if self._stopping:
                 raise RuntimeError("A recording is still finalizing. Wait before starting again.")
 
+            verify_camera_available()
             validate_system_commands("rpicam-vid", "ffmpeg")
             self._state_manager.begin_recording()
 
             filename, output_path = build_recording_filename()
             recording_id = filename.removesuffix(".mp4")
+            started_at = time.time()
             self._process_errors = []
 
             ffmpeg_command = [
@@ -438,7 +582,7 @@ class DirectRecordingManager:
                 capture_stderr("ffmpeg", self._ffmpeg_process, self._process_errors)
                 self._camera_process.stdout.close()
 
-                time.sleep(0.35)
+                time.sleep(RECORDING_WATCHDOG_SECONDS)
                 self._raise_if_process_failed()
 
                 self._active_recording = {
@@ -447,7 +591,19 @@ class DirectRecordingManager:
                     "output_path": output_path,
                     "camera_pid": self._camera_process.pid,
                     "ffmpeg_pid": self._ffmpeg_process.pid,
+                    "started_at": started_at,
                 }
+
+                persist_active_recording_state(
+                    {
+                        "recordingId": recording_id,
+                        "filename": filename,
+                        "outputPath": str(output_path),
+                        "cameraPid": self._camera_process.pid,
+                        "ffmpegPid": self._ffmpeg_process.pid,
+                        "startedAt": started_at,
+                    }
+                )
 
                 logger.info(
                     "Recording started id=%s path=%s camera_pid=%s ffmpeg_pid=%s",
@@ -466,6 +622,7 @@ class DirectRecordingManager:
                 }
             except Exception:
                 self._cleanup_processes_unlocked()
+                clear_active_recording_state()
                 self._state_manager.end_recording()
                 raise
 
@@ -482,6 +639,7 @@ class DirectRecordingManager:
 
             output_path: Path = self._active_recording["output_path"]
             filename: str = self._active_recording["filename"]
+            started_at: float = self._active_recording.get("started_at", time.time())
             self._stopping = True
             self._active_recording = None
 
@@ -520,20 +678,38 @@ class DirectRecordingManager:
             self._ffmpeg_process = None
             self._state_manager.end_recording()
 
+            stable_size = wait_for_file_stable(output_path)
             validation = validate_mp4(output_path)
             file_size = output_path.stat().st_size
+            recording_duration_seconds = max(0.0, time.time() - started_at)
+
+            if file_size != stable_size:
+                logger.warning(
+                    "Recording file size changed after stabilization id=%s size=%d stable=%d",
+                    recording_id,
+                    file_size,
+                    stable_size,
+                )
+
+            clear_active_recording_state()
+
             logger.info(
-                "Recording stopped id=%s path=%s size=%d bytes validation=%s",
+                "Recording stopped id=%s path=%s duration=%.2fs final_size=%d bytes validation=%s",
                 recording_id,
                 output_path,
+                recording_duration_seconds,
                 file_size,
                 validation,
             )
             return output_path, {
                 "filename": filename,
                 "fileSize": file_size,
+                "recordingDurationSeconds": recording_duration_seconds,
                 "validation": validation,
             }
+        except Exception:
+            clear_active_recording_state()
+            raise
         finally:
             with self._lock:
                 self._stopping = False
@@ -1007,6 +1183,7 @@ def recording_stop() -> tuple[Response, int] | Response:
                 "downloadUrl": f"/recordings/{filename}",
                 "filename": filename,
                 "fileSize": file_size,
+                "recordingDurationSeconds": details["recordingDurationSeconds"],
                 "validation": details["validation"],
                 "cameraState": camera_state_manager.state.value,
             }
@@ -1063,6 +1240,7 @@ def recording_delete(filename: str) -> tuple[Response, int] | Response:
     except FileNotFoundError:
         return jsonify({"success": False, "message": "Recording was not found."}), 404
 
+    logger.info("Recording deleted from Pi filename=%s", filename)
     return jsonify({"success": True, "message": "Recording deleted from Raspberry Pi."})
 
 

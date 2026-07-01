@@ -59,18 +59,25 @@ export function useRecordingState(): UseRecordingStateResult {
       const stopResponse = await raspberryPiService.stopRecording(activeRecordingId);
       const savedVideo = await raspberryPiService.downloadRecording(
         stopResponse.downloadUrl,
-        stopResponse.filename
+        stopResponse.filename,
+        stopResponse.fileSize
       );
 
       if (!savedVideo.path || savedVideo.size <= 0) {
         throw new Error("The recording was saved locally, but the file is not playable.");
       }
 
+      if (savedVideo.size !== stopResponse.fileSize) {
+        throw new Error(
+          `Downloaded recording size mismatch: expected ${stopResponse.fileSize} bytes, saved ${savedVideo.size} bytes.`
+        );
+      }
+
       setLastSavedVideo(savedVideo);
       setRecordingId(null);
       setRecordingState("idle");
 
-      if (stopResponse.filename) {
+      if (stopResponse.filename && savedVideo.path && savedVideo.size > 0) {
         try {
           await raspberryPiService.deleteRecordingFromPiAfterSuccessfulDownload(
             stopResponse.filename

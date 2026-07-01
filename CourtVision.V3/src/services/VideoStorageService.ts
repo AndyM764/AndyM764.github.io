@@ -9,6 +9,7 @@ class VideoStorageService {
   async saveRecordingFromUrl(
     downloadUrl: string,
     preferredFilename?: string,
+    expectedFileSize?: number,
     maxAttempts: number = raspberryPiConfig.downloadRetryCount
   ): Promise<SavedVideo> {
     if (!downloadUrl.trim()) {
@@ -36,6 +37,17 @@ class VideoStorageService {
         const size = downloadedFile.size;
         if (!Number.isFinite(size) || size <= 0) {
           throw new Error("The recording was saved locally, but the file size is zero.");
+        }
+
+        if (
+          typeof expectedFileSize === "number" &&
+          Number.isFinite(expectedFileSize) &&
+          expectedFileSize > 0 &&
+          size !== expectedFileSize
+        ) {
+          throw new Error(
+            `Recording download size mismatch: expected ${expectedFileSize} bytes, received ${size} bytes.`
+          );
         }
 
         return {

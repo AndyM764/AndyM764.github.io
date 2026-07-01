@@ -8,12 +8,24 @@ export type StartRecordingResponse = {
   message?: string;
 };
 
+export type RecordingValidation = {
+  fileExists: boolean;
+  fileSize: number;
+  ffprobeAvailable: boolean;
+  duration?: number | null;
+  validVideoStream?: boolean | null;
+  passed: boolean;
+  warning?: string;
+};
+
 export type StopRecordingResponse = {
   success: boolean;
   recordingId: string;
   downloadUrl: string;
   filename?: string;
-  fileSize?: number;
+  fileSize: number;
+  recordingDurationSeconds?: number;
+  validation?: RecordingValidation;
   message?: string;
 };
 
