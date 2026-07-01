@@ -1,3 +1,4 @@
+import logging
 import os
 import shutil
 import signal
@@ -7,11 +8,18 @@ import sys
 import threading
 import time
 import uuid
+from datetime import datetime, timezone
 from enum import Enum
 from pathlib import Path
 from typing import Any, Literal
 
 from flask import Flask, Response, jsonify, request, send_file, send_from_directory
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s %(levelname)s [CourtVision] %(message)s",
+)
+logger = logging.getLogger("courtvision")
 
 app = Flask(__name__)
 
@@ -215,14 +223,31 @@ def terminate_process(process: subprocess.Popen[bytes] | None, timeout_seconds: 
         process.wait(timeout=timeout_seconds)
 
 
-def validate_mp4(mp4_path: Path) -> None:
-    if not mp4_path.exists() or mp4_path.stat().st_size == 0:
-        raise RuntimeError("Finalized MP4 file was not created.")
+def validate_mp4(mp4_path: Path) -> dict[str, Any]:
+    if not mp4_path.exists():
+        raise RuntimeError(f"Recording file does not exist at {mp4_path}.")
 
-    if shutil.which("ffprobe") is None:
-        return
+    file_size = mp4_path.stat().st_size
+    if file_size <= 0:
+        raise RuntimeError(f"Recording file at {mp4_path} has zero size.")
 
-    ffprobe_command = [
+    result: dict[str, Any] = {
+        "fileExists": True,
+        "fileSize": file_size,
+        "ffprobeAvailable": shutil.which("ffprobe") is not None,
+        "duration": None,
+        "validVideoStream": None,
+        "passed": True,
+    }
+
+    if not result["ffprobeAvailable"]:
+        logger.warning(
+            "ffprobe is not installed; MP4 validation used file existence and size only for %s",
+            mp4_path,
+        )
+        return result
+
+    duration_command = [
         "ffprobe",
         "-v",
         "error",
@@ -234,26 +259,65 @@ def validate_mp4(mp4_path: Path) -> None:
         "default=noprint_wrappers=1:nokey=1",
         str(mp4_path),
     ]
+    stream_command = [
+        "ffprobe",
+        "-v",
+        "error",
+        "-select_streams",
+        "v:0",
+        "-show_entries",
+        "stream=codec_type",
+        "-of",
+        "default=noprint_wrappers=1:nokey=1",
+        str(mp4_path),
+    ]
 
     try:
-        completed = subprocess.run(ffprobe_command, capture_output=True, text=True, check=False)
-    except (OSError, subprocess.SubprocessError):
-        return
+        duration_result = subprocess.run(duration_command, capture_output=True, text=True, check=False)
+        stream_result = subprocess.run(stream_command, capture_output=True, text=True, check=False)
+    except (OSError, subprocess.SubprocessError) as error:
+        logger.warning("ffprobe validation skipped due to execution error: %s", error)
+        return result
 
-    if completed.returncode != 0:
-        return
+    if duration_result.returncode != 0:
+        raise RuntimeError(
+            "Recording MP4 failed ffprobe duration validation: "
+            f"{duration_result.stderr.strip() or 'unknown ffprobe error'}"
+        )
+
+    if stream_result.returncode != 0 or stream_result.stdout.strip() != "video":
+        raise RuntimeError(
+            "Recording MP4 does not contain a valid H.264 video stream for mobile playback."
+        )
 
     try:
-        duration = float(completed.stdout.strip())
-    except ValueError:
-        return
+        duration = float(duration_result.stdout.strip())
+    except ValueError as error:
+        raise RuntimeError("Recording MP4 does not contain a parseable duration.") from error
 
     if duration <= 0:
-        return
+        raise RuntimeError("Recording MP4 duration must be greater than zero.")
+
+    result["duration"] = duration
+    result["validVideoStream"] = True
+    logger.info(
+        "ffprobe validation passed for %s (duration=%.3fs, size=%d bytes)",
+        mp4_path,
+        duration,
+        file_size,
+    )
+    return result
+
+
+def build_recording_filename() -> tuple[str, Path]:
+    timestamp = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
+    recording_id = uuid.uuid4().hex[:8]
+    filename = f"courtvision-{timestamp}-{recording_id}.mp4"
+    return filename, RECORDING_DIR / filename
 
 
 class DirectRecordingManager:
-    """Recording-first pipeline: rpicam-vid -> ffmpeg -> MP4 on disk."""
+    """Recording-only pipeline: rpicam-vid -> ffmpeg -> MP4 on disk."""
 
     def __init__(self, state_manager: CameraStateManager) -> None:
         self._state_manager = state_manager
@@ -262,40 +326,66 @@ class DirectRecordingManager:
         self._camera_process: subprocess.Popen[bytes] | None = None
         self._ffmpeg_process: subprocess.Popen[bytes] | None = None
         self._process_errors: list[str] = []
+        self._stopping = False
 
     @property
     def is_recording(self) -> bool:
         with self._lock:
             return self._active_recording is not None
 
+    def recover_orphans(self) -> None:
+        with self._lock:
+            if self._active_recording is None and not self._processes_running_unlocked():
+                if self._state_manager.state == CameraState.RECORDING:
+                    logger.warning("Recovering orphaned recording state back to IDLE.")
+                    self._state_manager.force_idle()
+                return
+
+            if self._active_recording is not None and not self._processes_running_unlocked():
+                logger.warning(
+                    "Cleaning up crashed recording session %s.",
+                    self._active_recording.get("recording_id"),
+                )
+                self._active_recording = None
+                self._cleanup_processes_unlocked()
+                if self._state_manager.state == CameraState.RECORDING:
+                    self._state_manager.force_idle()
+
     def processes_running(self) -> bool:
         with self._lock:
-            return (
-                self._camera_process is not None
-                and self._camera_process.poll() is None
-                and self._ffmpeg_process is not None
-                and self._ffmpeg_process.poll() is None
-            )
+            return self._processes_running_unlocked()
+
+    def _processes_running_unlocked(self) -> bool:
+        return (
+            self._camera_process is not None
+            and self._camera_process.poll() is None
+            and self._ffmpeg_process is not None
+            and self._ffmpeg_process.poll() is None
+        )
 
     def force_abort(self) -> None:
         with self._lock:
             self._active_recording = None
+            self._stopping = False
 
         self._cleanup_processes()
 
         if self._state_manager.state == CameraState.RECORDING:
-            self._state_manager.end_recording()
+            self._state_manager.force_idle()
 
-    def start(self) -> str:
+    def start(self) -> dict[str, Any]:
         with self._lock:
             if self._active_recording is not None:
                 raise RuntimeError("A recording is already in progress.")
 
+            if self._stopping:
+                raise RuntimeError("A recording is still finalizing. Wait before starting again.")
+
             validate_system_commands("rpicam-vid", "ffmpeg")
             self._state_manager.begin_recording()
 
-            recording_id = uuid.uuid4().hex
-            output_path = RECORDING_DIR / f"{recording_id}.mp4"
+            filename, output_path = build_recording_filename()
+            recording_id = filename.removesuffix(".mp4")
             self._process_errors = []
 
             ffmpeg_command = [
@@ -353,17 +443,37 @@ class DirectRecordingManager:
 
                 self._active_recording = {
                     "recording_id": recording_id,
+                    "filename": filename,
                     "output_path": output_path,
+                    "camera_pid": self._camera_process.pid,
+                    "ffmpeg_pid": self._ffmpeg_process.pid,
                 }
 
-                return recording_id
+                logger.info(
+                    "Recording started id=%s path=%s camera_pid=%s ffmpeg_pid=%s",
+                    recording_id,
+                    output_path,
+                    self._camera_process.pid,
+                    self._ffmpeg_process.pid,
+                )
+
+                return {
+                    "recordingId": recording_id,
+                    "filename": filename,
+                    "outputPath": str(output_path),
+                    "cameraPid": self._camera_process.pid,
+                    "ffmpegPid": self._ffmpeg_process.pid,
+                }
             except Exception:
-                self._cleanup_processes()
+                self._cleanup_processes_unlocked()
                 self._state_manager.end_recording()
                 raise
 
-    def stop(self, recording_id: str) -> Path:
+    def stop(self, recording_id: str) -> tuple[Path, dict[str, Any]]:
         with self._lock:
+            if self._stopping:
+                raise RuntimeError("Recording stop is already in progress.")
+
             if self._active_recording is None:
                 raise RuntimeError("No recording is in progress.")
 
@@ -371,44 +481,68 @@ class DirectRecordingManager:
                 raise RuntimeError("Recording ID does not match the active recording.")
 
             output_path: Path = self._active_recording["output_path"]
+            filename: str = self._active_recording["filename"]
+            self._stopping = True
             self._active_recording = None
 
-        terminate_process(self._camera_process)
-        self._camera_process = None
+        logger.info("Recording stop requested id=%s path=%s", recording_id, output_path)
 
-        if self._ffmpeg_process is not None and self._ffmpeg_process.stdin is not None:
-            try:
-                self._ffmpeg_process.stdin.close()
-            except OSError:
-                pass
+        try:
+            terminate_process(self._camera_process)
+            self._camera_process = None
 
-        if self._ffmpeg_process is not None:
-            try:
-                self._ffmpeg_process.wait(timeout=RECORDING_FINALIZE_TIMEOUT_SECONDS)
-            except subprocess.TimeoutExpired:
-                terminate_process(self._ffmpeg_process, timeout_seconds=5)
-                self._ffmpeg_process = None
-                self._state_manager.end_recording()
-                raise RuntimeError(
-                    "Recording finalization timed out. "
-                    f"{self._get_process_diagnostics()}"
-                )
+            if self._ffmpeg_process is not None and self._ffmpeg_process.stdin is not None:
+                try:
+                    self._ffmpeg_process.stdin.close()
+                except OSError:
+                    pass
 
-            if self._ffmpeg_process.poll() not in (0, None):
-                diagnostics = self._get_process_diagnostics()
-                self._ffmpeg_process = None
-                self._state_manager.end_recording()
-                raise RuntimeError(
-                    "ffmpeg failed while finalizing the recording. " + diagnostics
-                )
+            if self._ffmpeg_process is not None:
+                try:
+                    self._ffmpeg_process.wait(timeout=RECORDING_FINALIZE_TIMEOUT_SECONDS)
+                except subprocess.TimeoutExpired:
+                    terminate_process(self._ffmpeg_process, timeout_seconds=5)
+                    self._ffmpeg_process = None
+                    self._state_manager.end_recording()
+                    raise RuntimeError(
+                        "Recording finalization timed out. "
+                        f"{self._get_process_diagnostics()}"
+                    )
 
-        self._ffmpeg_process = None
-        self._state_manager.end_recording()
+                if self._ffmpeg_process.poll() not in (0, None):
+                    diagnostics = self._get_process_diagnostics()
+                    self._ffmpeg_process = None
+                    self._state_manager.end_recording()
+                    raise RuntimeError(
+                        "ffmpeg failed while finalizing the recording. " + diagnostics
+                    )
 
-        validate_mp4(output_path)
-        return output_path
+            self._ffmpeg_process = None
+            self._state_manager.end_recording()
+
+            validation = validate_mp4(output_path)
+            file_size = output_path.stat().st_size
+            logger.info(
+                "Recording stopped id=%s path=%s size=%d bytes validation=%s",
+                recording_id,
+                output_path,
+                file_size,
+                validation,
+            )
+            return output_path, {
+                "filename": filename,
+                "fileSize": file_size,
+                "validation": validation,
+            }
+        finally:
+            with self._lock:
+                self._stopping = False
 
     def _cleanup_processes(self) -> None:
+        with self._lock:
+            self._cleanup_processes_unlocked()
+
+    def _cleanup_processes_unlocked(self) -> None:
         terminate_process(self._ffmpeg_process)
         terminate_process(self._camera_process)
         self._ffmpeg_process = None
@@ -629,6 +763,13 @@ class HlsPreviewManager:
 
 recording_manager = DirectRecordingManager(camera_state_manager)
 preview_manager = HlsPreviewManager(camera_state_manager)
+recording_manager.recover_orphans()
+
+
+def prepare_recording_camera() -> None:
+    if preview_manager.enabled:
+        logger.info("Stopping camera preview before recording starts.")
+        preview_manager.set_enabled(False)
 
 
 def delete_recording_file(filename: str) -> None:
@@ -811,11 +952,9 @@ def camera_hls_segment(filename: str) -> tuple[Response, int] | Response:
 
 @app.post("/recording/start")
 def recording_start() -> tuple[Response, int] | Response:
-    if camera_state_manager.state == CameraState.PREVIEW:
-        return camera_conflict_response()
-
     try:
-        recording_id = recording_manager.start()
+        prepare_recording_camera()
+        started = recording_manager.start()
 
         if not recording_manager.processes_running():
             recording_manager.force_abort()
@@ -829,9 +968,12 @@ def recording_start() -> tuple[Response, int] | Response:
         return jsonify(
             {
                 "success": True,
-                "recordingId": recording_id,
+                "recordingId": started["recordingId"],
+                "filename": started["filename"],
                 "processesRunning": True,
                 "recordingActive": True,
+                "cameraPid": started["cameraPid"],
+                "ffmpegPid": started["ffmpegPid"],
                 "cameraState": camera_state_manager.state.value,
             }
         )
@@ -854,17 +996,9 @@ def recording_stop() -> tuple[Response, int] | Response:
         return jsonify({"success": False, "message": "Recording ID is required."}), 400
 
     try:
-        mp4_path = recording_manager.stop(recording_id)
-        filename = mp4_path.name
-        file_size = mp4_path.stat().st_size
-
-        if file_size <= 0:
-            return jsonify(
-                {
-                    "success": False,
-                    "message": "Recording file was created but has zero size.",
-                }
-            ), 500
+        mp4_path, details = recording_manager.stop(recording_id)
+        filename = details["filename"]
+        file_size = details["fileSize"]
 
         return jsonify(
             {
@@ -873,6 +1007,7 @@ def recording_stop() -> tuple[Response, int] | Response:
                 "downloadUrl": f"/recordings/{filename}",
                 "filename": filename,
                 "fileSize": file_size,
+                "validation": details["validation"],
                 "cameraState": camera_state_manager.state.value,
             }
         )
@@ -888,8 +1023,14 @@ def recording_download(filename: str) -> tuple[Response, int] | Response:
     recording_path = RECORDING_DIR / filename
 
     if not recording_path.exists():
-        return jsonify({"success": False, "message": "Recording was not found."}), 404
+        logger.warning("Download requested for missing recording: %s", filename)
+        return jsonify({"success": False, "message": "Recording was not found on the Raspberry Pi."}), 404
 
+    file_size = recording_path.stat().st_size
+    if file_size <= 0:
+        return jsonify({"success": False, "message": "Recording file exists but is empty."}), 500
+
+    logger.info("Download started filename=%s path=%s size=%d", filename, recording_path, file_size)
     response = send_file(
         recording_path,
         as_attachment=True,
@@ -897,6 +1038,9 @@ def recording_download(filename: str) -> tuple[Response, int] | Response:
         mimetype="video/mp4",
     )
     response.headers["Cache-Control"] = "no-store"
+    response.call_on_close(
+        lambda: logger.info("Download completed filename=%s size=%d", filename, file_size)
+    )
     return response
 
 

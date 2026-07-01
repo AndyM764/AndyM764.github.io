@@ -166,9 +166,15 @@ class RaspberryPiService {
       throw new Error("The Raspberry Pi recording response did not include a recording ID.");
     }
 
+    if (response.processesRunning !== true) {
+      throw new Error("The Raspberry Pi camera recording process did not start.");
+    }
+
     return {
       success: true,
       recordingId: response.recordingId.trim(),
+      filename: typeof response.filename === "string" ? response.filename : undefined,
+      processesRunning: true,
       message: typeof response.message === "string" ? response.message : undefined
     };
   }
@@ -195,11 +201,16 @@ class RaspberryPiService {
       throw new Error("The Raspberry Pi recording response did not include a download URL.");
     }
 
+    if (typeof response.fileSize !== "number" || response.fileSize <= 0) {
+      throw new Error("The Raspberry Pi finalized recording has an invalid file size.");
+    }
+
     return {
       success: true,
       recordingId,
       downloadUrl: response.downloadUrl.trim(),
       filename: typeof response.filename === "string" ? response.filename : undefined,
+      fileSize: response.fileSize,
       message: typeof response.message === "string" ? response.message : undefined
     };
   }

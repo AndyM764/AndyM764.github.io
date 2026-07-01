@@ -1,12 +1,12 @@
-import { useCallback, useState } from "react";
+import { useCallback, useRef, useState } from "react";
 
 import { raspberryPiService } from "../services/RaspberryPiService";
-import type { RecordingState } from "../types/recording";
+import type { RecordingState, SavedVideo } from "../types/recording";
 
 type UseRecordingStateResult = {
   recordingState: RecordingState;
   recordingId: string | null;
-  lastSavedVideoPath: string | null;
+  lastSavedVideo: SavedVideo | null;
   errorMessage: string | null;
   startRecording: () => Promise<void>;
   stopRecording: () => Promise<void>;
@@ -15,10 +15,16 @@ type UseRecordingStateResult = {
 export function useRecordingState(): UseRecordingStateResult {
   const [recordingState, setRecordingState] = useState<RecordingState>("idle");
   const [recordingId, setRecordingId] = useState<string | null>(null);
-  const [lastSavedVideoPath, setLastSavedVideoPath] = useState<string | null>(null);
+  const [lastSavedVideo, setLastSavedVideo] = useState<SavedVideo | null>(null);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
+  const stopInProgressRef = useRef(false);
 
   const startRecording = useCallback(async () => {
+    if (recordingState === "recording" || recordingState === "saving") {
+      setErrorMessage("A recording is already in progress.");
+      return;
+    }
+
     setErrorMessage(null);
 
     try {
@@ -30,14 +36,20 @@ export function useRecordingState(): UseRecordingStateResult {
       setRecordingId(null);
       setErrorMessage(error instanceof Error ? error.message : "Unable to start recording.");
     }
-  }, []);
+  }, [recordingState]);
 
   const stopRecording = useCallback(async () => {
+    if (stopInProgressRef.current) {
+      setErrorMessage("Recording stop is already in progress.");
+      return;
+    }
+
     if (!recordingId) {
       setErrorMessage("No active recording ID is available.");
       return;
     }
 
+    stopInProgressRef.current = true;
     setRecordingState("saving");
     setErrorMessage(null);
 
@@ -50,7 +62,11 @@ export function useRecordingState(): UseRecordingStateResult {
         stopResponse.filename
       );
 
-      setLastSavedVideoPath(savedVideo.path);
+      if (!savedVideo.path || savedVideo.size <= 0) {
+        throw new Error("The recording was saved locally, but the file is not playable.");
+      }
+
+      setLastSavedVideo(savedVideo);
       setRecordingId(null);
       setRecordingState("idle");
 
@@ -60,19 +76,21 @@ export function useRecordingState(): UseRecordingStateResult {
             stopResponse.filename
           );
         } catch {
-          // Keep the saved phone file. The Pi copy remains available for retry deletion.
+          // Phone copy is valid. Pi cleanup can be retried later.
         }
       }
     } catch (error) {
       setRecordingState("idle");
       setErrorMessage(error instanceof Error ? error.message : "Unable to stop recording.");
+    } finally {
+      stopInProgressRef.current = false;
     }
   }, [recordingId]);
 
   return {
     recordingState,
     recordingId,
-    lastSavedVideoPath,
+    lastSavedVideo,
     errorMessage,
     startRecording,
     stopRecording
