@@ -105,35 +105,108 @@ def get_current_ip_address() -> str:
             return ""
 
 
+def is_ignorable_deploy_artifact_dir(path: Path) -> bool:
+    name = path.name
+    return (
+        name.startswith("backend.staging-")
+        or name.startswith("courtvision-backup-")
+        or name.startswith("backup-")
+    )
+
+
+def warn_ignorable_deploy_artifacts(runtime_backend_dir: Path) -> None:
+    courtvision_root = runtime_backend_dir.parent
+    if not courtvision_root.is_dir():
+        return
+
+    try:
+        children = list(courtvision_root.iterdir())
+    except OSError:
+        return
+
+    for child in children:
+        if child.is_dir() and is_ignorable_deploy_artifact_dir(child):
+            logger.warning("Found stale staging directory, ignoring: %s", child)
+
+
+def find_conflicting_flask_process(runtime_app: Path) -> Path | None:
+    runtime_app = runtime_app.resolve()
+    our_pid = os.getpid()
+    proc_root = Path("/proc")
+
+    if not proc_root.is_dir():
+        return None
+
+    for entry in proc_root.iterdir():
+        if not entry.name.isdigit():
+            continue
+
+        pid = int(entry.name)
+        if pid == our_pid:
+            continue
+
+        try:
+            cmdline = (entry / "cmdline").read_bytes().replace(b"\x00", b" ").decode("utf-8", errors="replace")
+        except OSError:
+            continue
+
+        if "app.py" not in cmdline:
+            continue
+
+        try:
+            cwd = (entry / "cwd").resolve()
+        except OSError:
+            continue
+
+        other_app = cwd / "app.py"
+        if other_app.is_file() and other_app.resolve() != runtime_app:
+            return other_app.resolve()
+
+    return None
+
+
 def validate_single_backend() -> None:
     backend_app = Path(__file__).resolve()
-    project_root = backend_app.parent.parent
-    ignored_parts = {"node_modules", ".venv", "__pycache__", ".git"}
+    runtime_backend_dir = backend_app.parent
+
+    if not backend_app.is_file():
+        raise SystemExit(
+            f"Invalid CourtVision backend layout: missing runtime app at {backend_app}."
+        )
 
     forbidden_names = {"camera" + "_server.py"}
-    duplicate_apps: list[Path] = []
-
-    for path in project_root.rglob("*"):
-        if not path.is_file():
-            continue
-
-        if any(part in ignored_parts for part in path.parts):
-            continue
-
-        if path.name in forbidden_names:
+    for path in runtime_backend_dir.iterdir():
+        if path.is_file() and path.name in forbidden_names:
             raise SystemExit(
                 f"Invalid CourtVision backend layout: found forbidden file {path}. "
                 "Use only backend/app.py."
             )
 
-        if path.name == "app.py" and path.resolve() != backend_app:
-            duplicate_apps.append(path)
+    duplicate_runtime_apps = [
+        path.resolve()
+        for path in runtime_backend_dir.rglob("app.py")
+        if path.is_file() and path.resolve() != backend_app
+    ]
+    runtime_layout_invalid = bool(duplicate_runtime_apps)
 
-    if duplicate_apps:
-        joined = ", ".join(str(path) for path in duplicate_apps)
+    warn_ignorable_deploy_artifacts(runtime_backend_dir)
+
+    conflicting_app = find_conflicting_flask_process(backend_app)
+    if conflicting_app is not None:
+        logger.warning(
+            "Found another running CourtVision backend process using %s",
+            conflicting_app,
+        )
+
+    if runtime_layout_invalid:
+        for duplicate_app in duplicate_runtime_apps:
+            logger.warning("Ignoring duplicate app.py in runtime tree: %s", duplicate_app)
+
+    if runtime_layout_invalid and conflicting_app is not None:
+        joined = ", ".join(str(path) for path in duplicate_runtime_apps)
         raise SystemExit(
             "Invalid CourtVision backend layout: multiple Flask apps detected "
-            f"({joined}). Use only backend/app.py."
+            f"({joined}) with conflicting running process ({conflicting_app})."
         )
 
 
