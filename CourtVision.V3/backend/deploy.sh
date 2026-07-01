@@ -6,6 +6,7 @@
 #
 # Environment overrides:
 #   COURTVISION_AUTO_CONFIRM=y   Skip interactive confirmation prompt
+#   COURTVISION_SSH_DEBUG=1        Print SSH auth method trace (ssh -v)
 
 set -euo pipefail
 
@@ -17,6 +18,7 @@ REMOTE_DIR="/home/andy76/courtvision/backend"
 PORT="5000"
 HEALTH_TIMEOUT_SECONDS="${COURTVISION_DEPLOY_HEALTH_TIMEOUT:-30}"
 AUTO_CONFIRM="${COURTVISION_AUTO_CONFIRM:-}"
+SSH_DEBUG="${COURTVISION_SSH_DEBUG:-}"
 VERIFY_SCRIPT="${SCRIPT_DIR}/verify.sh"
 
 DEPLOY_RESULT="PASS"
@@ -30,6 +32,56 @@ log() {
 
 warn() {
   printf 'WARN: %s\n' "$*"
+}
+
+pi_ssh_print_config() {
+  log "SSH effective configuration for ${PI_TARGET}:"
+  ssh -G "${PI_TARGET}" 2>/dev/null | grep -iE '^(user |hostname |port |identityfile |preferredauthentications |pubkeyauthentication |passwordauthentication |kbdinteractiveauthentication |batchmode )' || true
+}
+
+pi_ssh_print_auth_trace() {
+  local trace_file="$1"
+  log "SSH authentication trace:"
+  grep -iE 'authenticat|Offering|Trying|publickey|password|keyboard-interactive|identity file|Agent|Permission denied|Authenticated to' "${trace_file}" \
+    || cat "${trace_file}"
+}
+
+# Uses the same ssh invocation as a manual terminal session (no BatchMode).
+pi_ssh() {
+  if [[ "${SSH_DEBUG}" == "1" ]]; then
+    pi_ssh_print_config
+    log "SSH command: ssh ${PI_TARGET} $*"
+    local trace_file
+    trace_file="$(mktemp)"
+    if ssh -v "${PI_TARGET}" "$@" 2>"${trace_file}"; then
+      pi_ssh_print_auth_trace "${trace_file}"
+      rm -f "${trace_file}"
+      return 0
+    fi
+    pi_ssh_print_auth_trace "${trace_file}"
+    rm -f "${trace_file}"
+    return 1
+  fi
+
+  ssh "${PI_TARGET}" "$@"
+}
+
+pi_ssh_bash() {
+  if [[ "${SSH_DEBUG}" == "1" ]]; then
+    pi_ssh_print_config
+    log "SSH command: ssh ${PI_TARGET} bash -s"
+  fi
+  ssh "${PI_TARGET}" bash -s
+}
+
+pi_scp() {
+  if [[ "${SSH_DEBUG}" == "1" ]]; then
+    log "SCP command: scp -v $*"
+    scp -v "$@"
+    return $?
+  fi
+
+  scp "$@"
 }
 
 fail_deploy() {
@@ -128,17 +180,20 @@ if [[ -n "${LEGACY_BACKEND_FILE}" ]]; then
 fi
 
 log "Test SSH connection"
-if ! ssh -o BatchMode=yes -o ConnectTimeout=10 "${PI_TARGET}" 'echo connected' >/dev/null 2>&1; then
+SSH_TEST_ERR="$(mktemp)"
+if ! pi_ssh 'echo connected' 2>"${SSH_TEST_ERR}"; then
   fail_deploy \
     "SSH connection" \
     "ssh ${PI_TARGET}" \
-    "unavailable" \
-    "$(ssh -o BatchMode=yes -o ConnectTimeout=10 "${PI_TARGET}" 'echo connected' 2>&1 || true)"
+    "failed" \
+    "$(cat "${SSH_TEST_ERR}")"
+  rm -f "${SSH_TEST_ERR}"
   exit 1
 fi
+rm -f "${SSH_TEST_ERR}"
 
 log "Check ffprobe on Pi (warning only)"
-if ssh "${PI_TARGET}" 'command -v ffprobe >/dev/null 2>&1'; then
+if pi_ssh 'command -v ffprobe >/dev/null 2>&1'; then
   log "ffprobe is installed on Pi"
 else
   warn "ffprobe is not installed on Pi — recording validation will use file size only"
@@ -148,8 +203,8 @@ REMOTE_STAGE_DIR="/home/andy76/courtvision/backend.staging-$(date +%s)"
 BACKUP_DIR="/home/andy76/courtvision-backup-$(date +%Y%m%d-%H%M%S)"
 
 log "Upload staged backend"
-ssh "${PI_TARGET}" "mkdir -p '${REMOTE_STAGE_DIR}'"
-if ! scp -r "${LOCAL_BACKEND_DIR}/." "${PI_TARGET}:${REMOTE_STAGE_DIR}/"; then
+pi_ssh "mkdir -p '${REMOTE_STAGE_DIR}'"
+if ! pi_scp -r "${LOCAL_BACKEND_DIR}/." "${PI_TARGET}:${REMOTE_STAGE_DIR}/"; then
   fail_deploy \
     "backend upload" \
     "scp ${LOCAL_BACKEND_DIR}/. -> ${PI_TARGET}:${REMOTE_STAGE_DIR}/" \
@@ -159,7 +214,7 @@ if ! scp -r "${LOCAL_BACKEND_DIR}/." "${PI_TARGET}:${REMOTE_STAGE_DIR}/"; then
 fi
 
 log "Health-check staged backend on port 5001"
-STAGED_HEALTH_OUTPUT="$(ssh "${PI_TARGET}" bash -s <<EOF
+STAGED_HEALTH_OUTPUT="$(pi_ssh_bash <<EOF
 set -euo pipefail
 cd '${REMOTE_STAGE_DIR}'
 
@@ -214,7 +269,7 @@ if ! grep -q '^STAGED_HEALTH_OK$' <<<"${STAGED_HEALTH_OUTPUT}"; then
 fi
 
 log "Backup existing backend and promote staged build"
-PROMOTE_OUTPUT="$(ssh "${PI_TARGET}" bash -s <<EOF
+PROMOTE_OUTPUT="$(pi_ssh_bash <<EOF
 set -euo pipefail
 
 REMOTE_DIR='${REMOTE_DIR}'
@@ -250,7 +305,7 @@ if grep -q '^BACKUP_CREATED ' <<<"${PROMOTE_OUTPUT}"; then
 fi
 
 log "Stop old backend and start Flask on port ${PORT}"
-START_OUTPUT="$(ssh "${PI_TARGET}" bash -s <<EOF
+START_OUTPUT="$(pi_ssh_bash <<EOF
 set -euo pipefail
 
 REMOTE_DIR='${REMOTE_DIR}'
