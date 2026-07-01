@@ -61,10 +61,19 @@ RECORDING_DURATION_TOLERANCE_SECONDS = float(
 ACTIVE_RECORDING_STATE_FILE = Path(
     os.environ.get("COURTVISION_ACTIVE_RECORDING_STATE_FILE", "/tmp/courtvision-active-recording.json")
 )
+RECORDING_PROCESS_REGISTRY_FILE = Path(
+    os.environ.get("COURTVISION_RECORDING_PROCESS_REGISTRY_FILE", "/tmp/courtvision-recording-process-registry.json")
+)
+PROCESS_TERMINATION_TIMEOUT_SECONDS = float(
+    os.environ.get("COURTVISION_PROCESS_TERMINATION_TIMEOUT_SECONDS", "5")
+)
 
 CAMERA_CONFLICT_MESSAGE = "Raspberry Pi camera is busy."
 CAMERA_NOT_DETECTED_MESSAGE = "Raspberry Pi camera not detected."
 CAMERA_INITIALIZATION_FAILED_MESSAGE = "Failed to initialize Raspberry Pi camera."
+RECORDING_PROCESSES_RUNNING_MESSAGE = (
+    "Recording processes are already running on the Raspberry Pi."
+)
 
 last_parameters: dict[str, Any] | None = None
 ball_machine_power: Literal["on", "off"] = "off"
@@ -371,38 +380,289 @@ def wait_for_file_stable(mp4_path: Path, timeout_seconds: float = RECORDING_FILE
 
 
 def persist_active_recording_state(payload: dict[str, Any]) -> None:
-    ACTIVE_RECORDING_STATE_FILE.write_text(json.dumps(payload), encoding="utf-8")
+    persist_recording_process_registry(payload)
 
 
 def clear_active_recording_state() -> None:
     ACTIVE_RECORDING_STATE_FILE.unlink(missing_ok=True)
 
 
-def terminate_orphan_recording_processes() -> None:
-    if not ACTIVE_RECORDING_STATE_FILE.exists():
-        return
+def read_recording_process_registry() -> dict[str, Any] | None:
+    for registry_path in (RECORDING_PROCESS_REGISTRY_FILE, ACTIVE_RECORDING_STATE_FILE):
+        if not registry_path.exists():
+            continue
+
+        try:
+            payload = json.loads(registry_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            logger.warning("Unable to read recording process registry at %s", registry_path)
+            registry_path.unlink(missing_ok=True)
+            continue
+
+        if isinstance(payload, dict):
+            return payload
+
+    return None
+
+
+def persist_recording_process_registry(payload: dict[str, Any]) -> None:
+    serialized = json.dumps(payload)
+    RECORDING_PROCESS_REGISTRY_FILE.write_text(serialized, encoding="utf-8")
+    ACTIVE_RECORDING_STATE_FILE.write_text(serialized, encoding="utf-8")
+
+
+def clear_recording_process_registry() -> None:
+    RECORDING_PROCESS_REGISTRY_FILE.unlink(missing_ok=True)
+    clear_active_recording_state()
+
+
+def list_proc_pids() -> list[int]:
+    proc_root = Path("/proc")
+    if not proc_root.is_dir():
+        return []
+
+    pids: list[int] = []
+    for entry in proc_root.iterdir():
+        if entry.name.isdigit():
+            pids.append(int(entry.name))
+    return pids
+
+
+def read_proc_cmdline(pid: int) -> str:
+    try:
+        return (
+            Path(f"/proc/{pid}/cmdline")
+            .read_bytes()
+            .replace(b"\x00", b" ")
+            .decode("utf-8", errors="replace")
+            .strip()
+        )
+    except OSError:
+        return ""
+
+
+def pid_is_alive(pid: int | None) -> bool:
+    if pid is None or pid <= 0:
+        return False
 
     try:
-        payload = json.loads(ACTIVE_RECORDING_STATE_FILE.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        logger.warning("Unable to read active recording state file for orphan recovery.")
-        ACTIVE_RECORDING_STATE_FILE.unlink(missing_ok=True)
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    except OSError:
+        return False
+
+    return True
+
+
+def kill_pid(pid: int, label: str, timeout_seconds: float = PROCESS_TERMINATION_TIMEOUT_SECONDS) -> bool:
+    if not pid_is_alive(pid):
+        logger.info("Process already terminated %s pid=%s", label, pid)
+        return True
+
+    try:
+        os.kill(pid, signal.SIGTERM)
+        logger.warning("Sent SIGTERM to %s pid=%s", label, pid)
+    except ProcessLookupError:
+        return True
+    except OSError as error:
+        logger.warning("Unable to terminate %s pid=%s: %s", label, pid, error)
+        return not pid_is_alive(pid)
+
+    deadline = time.monotonic() + timeout_seconds
+    while time.monotonic() < deadline:
+        if not pid_is_alive(pid):
+            logger.info("Confirmed %s terminated pid=%s", label, pid)
+            return True
+        time.sleep(0.1)
+
+    if not pid_is_alive(pid):
+        return True
+
+    try:
+        os.kill(pid, signal.SIGKILL)
+        logger.warning("Sent SIGKILL to %s pid=%s", label, pid)
+    except ProcessLookupError:
+        return True
+    except OSError as error:
+        logger.warning("Unable to SIGKILL %s pid=%s: %s", label, pid, error)
+        return not pid_is_alive(pid)
+
+    deadline = time.monotonic() + 2
+    while time.monotonic() < deadline:
+        if not pid_is_alive(pid):
+            logger.info("Confirmed %s terminated after SIGKILL pid=%s", label, pid)
+            return True
+        time.sleep(0.1)
+
+    return not pid_is_alive(pid)
+
+
+def confirm_pid_terminated(pid: int | None, label: str) -> None:
+    if pid is None:
         return
 
-    for pid_key in ("cameraPid", "ffmpegPid"):
+    if kill_pid(pid, label):
+        return
+
+    raise RuntimeError(f"Failed to terminate recording process {label} pid={pid}.")
+
+
+def find_rpicam_vid_pids() -> list[int]:
+    pids: list[int] = []
+    for pid in list_proc_pids():
+        cmdline = read_proc_cmdline(pid)
+        if "rpicam-vid" in cmdline:
+            pids.append(pid)
+    return sorted(set(pids))
+
+
+def find_recording_ffmpeg_pids() -> list[int]:
+    recording_dir = str(RECORDING_DIR)
+    pids: list[int] = []
+    for pid in list_proc_pids():
+        cmdline = read_proc_cmdline(pid)
+        if "ffmpeg" in cmdline and recording_dir in cmdline:
+            pids.append(pid)
+    return sorted(set(pids))
+
+
+def cleanup_registry_stale_pids() -> None:
+    payload = read_recording_process_registry()
+    if payload is None:
+        return
+
+    for pid_key, label in (("cameraPid", "rpicam-vid"), ("ffmpegPid", "ffmpeg")):
+        pid = payload.get(pid_key)
+        if isinstance(pid, int) and pid_is_alive(pid):
+            kill_pid(pid, label)
+
+    clear_recording_process_registry()
+
+
+def cleanup_recording_processes_on_startup() -> None:
+    logger.info("Cleaning up stale recording processes on backend startup")
+
+    cleanup_registry_stale_pids()
+
+    for pid in find_rpicam_vid_pids():
+        kill_pid(pid, "rpicam-vid")
+
+    for pid in find_recording_ffmpeg_pids():
+        kill_pid(pid, "ffmpeg")
+
+    clear_recording_process_registry()
+
+    remaining_rpicam = find_rpicam_vid_pids()
+    remaining_ffmpeg = find_recording_ffmpeg_pids()
+    if remaining_rpicam or remaining_ffmpeg:
+        logger.warning(
+            "Recording process cleanup incomplete rpicam-vid=%s ffmpeg=%s",
+            remaining_rpicam,
+            remaining_ffmpeg,
+        )
+    else:
+        logger.info("Recording process cleanup complete: 0 rpicam-vid, 0 ffmpeg")
+
+
+def verify_recording_processes_not_running() -> None:
+    rpicam_pids = find_rpicam_vid_pids()
+    ffmpeg_pids = find_recording_ffmpeg_pids()
+
+    if rpicam_pids or ffmpeg_pids:
+        raise CameraBusyError(
+            f"{RECORDING_PROCESSES_RUNNING_MESSAGE} "
+            f"(rpicam-vid={rpicam_pids}, ffmpeg={ffmpeg_pids})."
+        )
+
+
+def confirm_recording_pipeline_stopped(
+    camera_pid: int | None,
+    ffmpeg_pid: int | None,
+) -> None:
+    if pid_is_alive(camera_pid):
+        if not kill_pid(int(camera_pid), "rpicam-vid"):
+            raise RuntimeError(f"Failed to terminate rpicam-vid pid={camera_pid}.")
+
+    if pid_is_alive(ffmpeg_pid):
+        if not kill_pid(int(ffmpeg_pid), "ffmpeg"):
+            raise RuntimeError(f"Failed to terminate ffmpeg pid={ffmpeg_pid}.")
+
+    remaining_ffmpeg = find_recording_ffmpeg_pids()
+    if remaining_ffmpeg:
+        for pid in remaining_ffmpeg:
+            kill_pid(pid, "ffmpeg")
+        remaining_ffmpeg = find_recording_ffmpeg_pids()
+        if remaining_ffmpeg:
+            raise RuntimeError(
+                "Recording ffmpeg processes still running after stop: "
+                f"{remaining_ffmpeg}."
+            )
+
+    logger.info(
+        "Recording pipeline stopped cleanly rpicam-vid=%s ffmpeg=%s",
+        camera_pid,
+        ffmpeg_pid,
+    )
+
+
+def build_debug_process_payload() -> dict[str, Any]:
+    rpicam_pids = find_rpicam_vid_pids()
+    ffmpeg_pids = find_recording_ffmpeg_pids()
+    registry = read_recording_process_registry()
+    camera_state = camera_state_manager.state.value
+    recording_active = recording_manager.is_recording
+    managed_processes_running = recording_manager.processes_running()
+
+    expected_process_count = 2 if recording_active and managed_processes_running else 0
+    actual_process_count = len(rpicam_pids) + len(ffmpeg_pids)
+
+    if recording_active:
+        recording_state_consistent = (
+            camera_state == CameraState.RECORDING.value
+            and managed_processes_running
+            and len(rpicam_pids) == 1
+            and len(ffmpeg_pids) == 1
+        )
+    else:
+        recording_state_consistent = (
+            camera_state != CameraState.RECORDING.value
+            and not managed_processes_running
+            and len(ffmpeg_pids) == 0
+        )
+
+    return {
+        "success": True,
+        "rpicamVidPids": rpicam_pids,
+        "ffmpegPids": ffmpeg_pids,
+        "processRegistry": registry,
+        "recordingActive": recording_active,
+        "cameraState": camera_state,
+        "managedProcessesRunning": managed_processes_running,
+        "expectedProcessCount": expected_process_count,
+        "actualProcessCount": actual_process_count,
+        "recordingStateConsistent": recording_state_consistent,
+    }
+
+
+def terminate_orphan_recording_processes() -> None:
+    payload = read_recording_process_registry()
+    if payload is None:
+        return
+
+    for pid_key, label in (("cameraPid", "rpicam-vid"), ("ffmpegPid", "ffmpeg")):
         pid = payload.get(pid_key)
         if not isinstance(pid, int):
             continue
 
-        try:
-            os.kill(pid, signal.SIGTERM)
+        if kill_pid(pid, label):
             logger.warning("Terminated orphan recording process %s=%s", pid_key, pid)
-        except ProcessLookupError:
-            logger.info("Orphan recording process already exited %s=%s", pid_key, pid)
-        except OSError as error:
-            logger.warning("Unable to terminate orphan recording process %s=%s: %s", pid_key, pid, error)
+        else:
+            logger.warning("Unable to terminate orphan recording process %s=%s", pid_key, pid)
 
-    clear_active_recording_state()
+    clear_recording_process_registry()
 
 
 def build_rpicam_command() -> list[str]:
@@ -651,25 +911,18 @@ class DirectRecordingManager:
             self._finalized_recordings.pop(recording_id, None)
 
     def recover_orphans(self) -> None:
+        cleanup_recording_processes_on_startup()
         terminate_orphan_recording_processes()
 
         with self._lock:
-            if self._active_recording is None and not self._processes_running_unlocked():
-                if self._state_manager.state == CameraState.RECORDING:
-                    logger.warning("Recovering orphaned recording state back to IDLE.")
-                    self._state_manager.force_idle()
-                return
+            self._active_recording = None
+            self._camera_process = None
+            self._ffmpeg_process = None
+            self._stopping = False
 
-            if self._active_recording is not None and not self._processes_running_unlocked():
-                logger.warning(
-                    "Cleaning up crashed recording session %s.",
-                    self._active_recording.get("recording_id"),
-                )
-                self._active_recording = None
-                self._cleanup_processes_unlocked()
-                clear_active_recording_state()
-                if self._state_manager.state == CameraState.RECORDING:
-                    self._state_manager.force_idle()
+            if self._state_manager.state == CameraState.RECORDING:
+                logger.warning("Recovering orphaned recording state back to IDLE.")
+                self._state_manager.force_idle()
 
     def processes_running(self) -> bool:
         with self._lock:
@@ -690,7 +943,7 @@ class DirectRecordingManager:
 
         self._cancel_timeout_timer()
         self._cleanup_processes()
-        clear_active_recording_state()
+        clear_recording_process_registry()
 
         if self._state_manager.state == CameraState.RECORDING:
             self._state_manager.force_idle()
@@ -704,6 +957,7 @@ class DirectRecordingManager:
                 raise RuntimeError("A recording is still finalizing. Wait before starting again.")
 
         verify_camera_not_busy_for_recording()
+        verify_recording_processes_not_running()
         verify_camera_available()
         free_storage_bytes = verify_tmp_storage_available()
         validate_system_commands("rpicam-vid", "ffmpeg")
@@ -821,14 +1075,14 @@ class DirectRecordingManager:
                 }
             except CameraInitializationError:
                 self._cancel_timeout_timer()
-                self._cleanup_processes_unlocked()
-                clear_active_recording_state()
+                self._cleanup_processes_unlocked(confirm_termination=True)
+                clear_recording_process_registry()
                 self._state_manager.end_recording()
                 raise
             except Exception as error:
                 self._cancel_timeout_timer()
-                self._cleanup_processes_unlocked()
-                clear_active_recording_state()
+                self._cleanup_processes_unlocked(confirm_termination=True)
+                clear_recording_process_registry()
                 self._state_manager.end_recording()
                 logger.error("Failed to initialize Raspberry Pi camera: %s", error)
                 raise CameraInitializationError(CAMERA_INITIALIZATION_FAILED_MESSAGE) from error
@@ -857,10 +1111,14 @@ class DirectRecordingManager:
 
         logger.info("Recording stop requested id=%s path=%s timed_out=%s", recording_id, output_path, timed_out)
 
+        camera_pid = self._camera_process.pid if self._camera_process is not None else None
+        ffmpeg_pid = self._ffmpeg_process.pid if self._ffmpeg_process is not None else None
+
         try:
             self._cancel_timeout_timer()
             terminate_process(self._camera_process)
             self._camera_process = None
+            confirm_pid_terminated(camera_pid, "rpicam-vid")
 
             if self._ffmpeg_process is not None and self._ffmpeg_process.stdin is not None:
                 try:
@@ -874,6 +1132,7 @@ class DirectRecordingManager:
                 except subprocess.TimeoutExpired:
                     terminate_process(self._ffmpeg_process, timeout_seconds=5)
                     self._ffmpeg_process = None
+                    confirm_pid_terminated(ffmpeg_pid, "ffmpeg")
                     self._state_manager.end_recording()
                     raise RuntimeError(
                         "Recording finalization timed out. "
@@ -883,12 +1142,14 @@ class DirectRecordingManager:
                 if self._ffmpeg_process.poll() not in (0, None):
                     diagnostics = self._get_process_diagnostics()
                     self._ffmpeg_process = None
+                    confirm_pid_terminated(ffmpeg_pid, "ffmpeg")
                     self._state_manager.end_recording()
                     raise RuntimeError(
                         "ffmpeg failed while finalizing the recording. " + diagnostics
                     )
 
             self._ffmpeg_process = None
+            confirm_recording_pipeline_stopped(camera_pid, ffmpeg_pid)
             self._state_manager.end_recording()
 
             stable_size = wait_for_file_stable(output_path)
@@ -905,7 +1166,7 @@ class DirectRecordingManager:
                     stable_size,
                 )
 
-            clear_active_recording_state()
+            clear_recording_process_registry()
 
             details: dict[str, Any] = {
                 "filename": filename,
@@ -938,7 +1199,8 @@ class DirectRecordingManager:
             )
             return output_path, details
         except Exception:
-            clear_active_recording_state()
+            self._cleanup_processes_unlocked(confirm_termination=True)
+            clear_recording_process_registry()
             raise
         finally:
             with self._lock:
@@ -979,11 +1241,18 @@ class DirectRecordingManager:
         with self._lock:
             self._cleanup_processes_unlocked()
 
-    def _cleanup_processes_unlocked(self) -> None:
+    def _cleanup_processes_unlocked(self, *, confirm_termination: bool = False) -> None:
+        camera_pid = self._camera_process.pid if self._camera_process is not None else None
+        ffmpeg_pid = self._ffmpeg_process.pid if self._ffmpeg_process is not None else None
+
         terminate_process(self._ffmpeg_process)
         terminate_process(self._camera_process)
         self._ffmpeg_process = None
         self._camera_process = None
+
+        if confirm_termination:
+            confirm_pid_terminated(ffmpeg_pid, "ffmpeg")
+            confirm_pid_terminated(camera_pid, "rpicam-vid")
 
     def _raise_if_process_failed(self) -> None:
         failed_processes: list[str] = []
@@ -1000,7 +1269,7 @@ class DirectRecordingManager:
 
         if failed_processes:
             diagnostics = self._get_process_diagnostics()
-            self._cleanup_processes()
+            self._cleanup_processes_unlocked(confirm_termination=True)
             logger.error(
                 "Recording pipeline failed to start: %s %s",
                 " ".join(failed_processes),
@@ -1272,6 +1541,11 @@ def status() -> Response:
         payload["recordingStartedAt"] = active_recording.get("startedAt")
 
     return jsonify(payload)
+
+
+@app.get("/debug/processes")
+def debug_processes() -> Response:
+    return jsonify(build_debug_process_payload())
 
 
 @app.post("/data")

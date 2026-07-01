@@ -16,9 +16,13 @@ End-to-end path: Phone UI → Expo → HTTP → Flask → Recording manager → 
 | 8 | Interrupted download recovery | retries, partial file cleanup, Pi file retained |
 | 9 | Safe Pi cleanup | delete only after verified local copy |
 | 10 | App restart recovery | `recoverActiveRecordingFromStatus()` on mount |
-| 11 | Backend crash recovery | `terminate_orphan_recording_processes()` |
-| 12 | Pi reboot recovery | orphan cleanup on backend startup |
+| 11 | Backend crash recovery | `cleanup_recording_processes_on_startup()` |
+| 12 | Pi reboot / deploy recovery | registry + `/proc` scan kills stale PIDs on startup |
 | 13 | Structured logging | camera, storage, PIDs, duration, sizes, validation, cleanup |
+| 14 | Process registry | `/tmp/courtvision-recording-process-registry.json` |
+| 15 | Start rejects existing processes | `verify_recording_processes_not_running()` |
+| 16 | Stop confirms 0 processes | `confirm_recording_pipeline_stopped()` |
+| 17 | Debug visibility | `GET /debug/processes` |
 
 ## Configuration (environment)
 
@@ -159,6 +163,29 @@ End-to-end path: Phone UI → Expo → HTTP → Flask → Recording manager → 
 ```json
 { "success": false, "message": "Recording MP4 must contain exactly one video stream, found 0." }
 ```
+
+### `GET /debug/processes`
+
+```json
+{
+  "success": true,
+  "rpicamVidPids": [1234],
+  "ffmpegPids": [1235],
+  "processRegistry": {
+    "recordingId": "courtvision-20260701-120000-a1b2c3d4",
+    "cameraPid": 1234,
+    "ffmpegPid": 1235
+  },
+  "recordingActive": true,
+  "cameraState": "RECORDING",
+  "managedProcessesRunning": true,
+  "expectedProcessCount": 2,
+  "actualProcessCount": 2,
+  "recordingStateConsistent": true
+}
+```
+
+While idle after stop: `rpicamVidPids: []`, `ffmpegPids: []`, `expectedProcessCount: 0`, `recordingStateConsistent: true`.
 
 ### `GET /recordings/<filename>` (unchanged; logs download size)
 
