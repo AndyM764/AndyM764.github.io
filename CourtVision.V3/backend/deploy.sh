@@ -4,6 +4,9 @@
 # Usage:
 #   ./deploy.sh andy76@<pi-ip>
 #
+# Raspberry Pi OS Bookworm (PEP 668): all Python packages install into
+# /home/andy76/courtvision/backend/.venv — never system Python.
+#
 # Environment overrides:
 #   COURTVISION_AUTO_CONFIRM=y   Skip interactive confirmation prompt
 #   COURTVISION_SSH_DEBUG=1        Print SSH auth method trace (ssh -v)
@@ -15,6 +18,8 @@ LOCAL_BACKEND_DIR="${SCRIPT_DIR}"
 
 PI_TARGET="${1:-}"
 REMOTE_DIR="/home/andy76/courtvision/backend"
+REMOTE_VENV="${REMOTE_DIR}/.venv"
+REMOTE_PYTHON="${REMOTE_VENV}/bin/python"
 PORT="5000"
 HEALTH_TIMEOUT_SECONDS="${COURTVISION_DEPLOY_HEALTH_TIMEOUT:-30}"
 AUTO_CONFIRM="${COURTVISION_AUTO_CONFIRM:-}"
@@ -218,22 +223,52 @@ STAGED_HEALTH_OUTPUT="$(pi_ssh_bash <<EOF
 set -euo pipefail
 cd '${REMOTE_STAGE_DIR}'
 
-mkdir -p /home/andy76/courtvision
-if [[ ! -d .venv ]]; then
-  python3 -m venv .venv
-fi
+setup_venv() {
+  local work_dir="\$1"
+  cd "\${work_dir}"
 
-source .venv/bin/activate
-pip install -q -r requirements.txt
+  if [[ ! -d .venv ]]; then
+    echo "[deploy-remote] Creating virtual environment at \${work_dir}/.venv"
+    if ! python3 -m venv .venv; then
+      echo "VENV_CREATE_FAIL"
+      exit 1
+    fi
+    echo "VENV_CREATED"
+  else
+    echo "VENV_EXISTS"
+  fi
 
-PORT=5001 python app.py >/tmp/courtvision-deploy-health.log 2>&1 &
+  # shellcheck disable=SC1091
+  source .venv/bin/activate
+
+  echo "PYTHON_WHICH=\$(which python)"
+  echo "PYTHON_VERSION=\$(python --version 2>&1)"
+  echo "PIP_VERSION=\$(pip --version 2>&1)"
+
+  if ! python -m pip install --upgrade pip; then
+    echo "PIP_UPGRADE_FAIL"
+    exit 1
+  fi
+  echo "PIP_UPGRADE_OK"
+
+  if ! pip install -r requirements.txt; then
+    echo "REQUIREMENTS_INSTALL_FAIL"
+    exit 1
+  fi
+  echo "REQUIREMENTS_INSTALL_OK"
+}
+
+setup_venv '${REMOTE_STAGE_DIR}'
+
+VENV_PYTHON='${REMOTE_STAGE_DIR}/.venv/bin/python'
+PORT=5001 "\${VENV_PYTHON}" app.py >/tmp/courtvision-deploy-health.log 2>&1 &
 HEALTH_PID=\$!
 trap 'kill "\$HEALTH_PID" >/dev/null 2>&1 || true' EXIT
 
 for attempt in \$(seq 1 ${HEALTH_TIMEOUT_SECONDS}); do
   HTTP_CODE=\$(curl -sS -m 5 -o /tmp/courtvision-deploy-status.json -w '%{http_code}' http://127.0.0.1:5001/status || true)
   if [[ "\${HTTP_CODE}" == "200" ]]; then
-    python3 - <<'PY'
+    "\${VENV_PYTHON}" - <<'PY'
 import json
 from pathlib import Path
 
@@ -258,6 +293,41 @@ cat /tmp/courtvision-deploy-health.log 2>/dev/null || true
 exit 1
 EOF
 )" || true
+
+if grep -q '^VENV_CREATE_FAIL$' <<<"${STAGED_HEALTH_OUTPUT}"; then
+  fail_deploy \
+    "virtual environment creation" \
+    "python3 -m venv ${REMOTE_STAGE_DIR}/.venv" \
+    "failed" \
+    "$(echo "${STAGED_HEALTH_OUTPUT}" | tail -n 20)"
+  exit 1
+fi
+
+if grep -q '^PIP_UPGRADE_FAIL$' <<<"${STAGED_HEALTH_OUTPUT}"; then
+  fail_deploy \
+    "pip upgrade" \
+    "python -m pip install --upgrade pip" \
+    "failed" \
+    "$(echo "${STAGED_HEALTH_OUTPUT}" | tail -n 20)"
+  exit 1
+fi
+
+if grep -q '^REQUIREMENTS_INSTALL_FAIL$' <<<"${STAGED_HEALTH_OUTPUT}"; then
+  fail_deploy \
+    "requirements installation" \
+    "pip install -r requirements.txt" \
+    "failed" \
+    "$(echo "${STAGED_HEALTH_OUTPUT}" | tail -n 20)"
+  exit 1
+fi
+
+while IFS= read -r line; do
+  case "${line}" in
+    PYTHON_WHICH=*|PYTHON_VERSION=*|PIP_VERSION=*|VENV_*|PIP_*|REQUIREMENTS_*)
+      log "${line}"
+      ;;
+  esac
+done <<<"${STAGED_HEALTH_OUTPUT}"
 
 if ! grep -q '^STAGED_HEALTH_OK$' <<<"${STAGED_HEALTH_OUTPUT}"; then
   fail_deploy \
@@ -287,6 +357,7 @@ fi
 
 mkdir -p "\${REMOTE_DIR}"
 cp -a "\${REMOTE_STAGE_DIR}/." "\${REMOTE_DIR}/"
+rm -rf "\${REMOTE_DIR}/.venv"
 rm -rf "\${REMOTE_STAGE_DIR}"
 echo "PROMOTE_OK"
 EOF
@@ -301,7 +372,7 @@ EOF
 
 if grep -q '^BACKUP_CREATED ' <<<"${PROMOTE_OUTPUT}"; then
   BACKUP_PATH="$(echo "${PROMOTE_OUTPUT}" | awk '/^BACKUP_CREATED /{print $2}')"
-  ROLLBACK_CMD="ssh ${PI_TARGET} 'rm -rf ${REMOTE_DIR} && cp -a ${BACKUP_PATH} ${REMOTE_DIR} && cd ${REMOTE_DIR} && . .venv/bin/activate && fuser -k ${PORT}/tcp 2>/dev/null || true; PORT=${PORT} nohup python app.py >/tmp/courtvision-backend.log 2>&1 &'"
+  ROLLBACK_CMD="ssh ${PI_TARGET} 'rm -rf ${REMOTE_DIR} && cp -a ${BACKUP_PATH} ${REMOTE_DIR} && fuser -k ${PORT}/tcp 2>/dev/null || true; PORT=${PORT} nohup ${REMOTE_PYTHON} ${REMOTE_DIR}/app.py >/tmp/courtvision-backend.log 2>&1 &'"
 fi
 
 log "Stop old backend and start Flask on port ${PORT}"
@@ -309,16 +380,52 @@ START_OUTPUT="$(pi_ssh_bash <<EOF
 set -euo pipefail
 
 REMOTE_DIR='${REMOTE_DIR}'
+REMOTE_PYTHON='${REMOTE_PYTHON}'
 PORT='${PORT}'
 
 cd "\${REMOTE_DIR}"
 
-if [[ ! -d .venv ]]; then
-  python3 -m venv .venv
-fi
+setup_venv() {
+  local work_dir="\$1"
+  cd "\${work_dir}"
 
-source .venv/bin/activate
-pip install -q -r requirements.txt
+  if [[ ! -d .venv ]]; then
+    echo "[deploy-remote] Creating virtual environment at \${work_dir}/.venv"
+    if ! python3 -m venv .venv; then
+      echo "VENV_CREATE_FAIL"
+      exit 1
+    fi
+    echo "VENV_CREATED"
+  else
+    echo "VENV_EXISTS"
+  fi
+
+  # shellcheck disable=SC1091
+  source .venv/bin/activate
+
+  echo "PYTHON_WHICH=\$(which python)"
+  echo "PYTHON_VERSION=\$(python --version 2>&1)"
+  echo "PIP_VERSION=\$(pip --version 2>&1)"
+
+  if ! python -m pip install --upgrade pip; then
+    echo "PIP_UPGRADE_FAIL"
+    exit 1
+  fi
+  echo "PIP_UPGRADE_OK"
+
+  if ! pip install -r requirements.txt; then
+    echo "REQUIREMENTS_INSTALL_FAIL"
+    exit 1
+  fi
+  echo "REQUIREMENTS_INSTALL_OK"
+}
+
+setup_venv "\${REMOTE_DIR}"
+
+if [[ ! -x "\${REMOTE_PYTHON}" ]]; then
+  echo "VENV_PYTHON_MISSING"
+  exit 1
+fi
 
 if command -v fuser >/dev/null 2>&1; then
   fuser -k "\${PORT}/tcp" >/dev/null 2>&1 || true
@@ -331,13 +438,13 @@ if [[ -f /tmp/courtvision-backend.pid ]]; then
   kill "\${old_pid}" >/dev/null 2>&1 || true
 fi
 
-nohup env PORT="\${PORT}" python app.py >/tmp/courtvision-backend.log 2>&1 &
+nohup env PORT="\${PORT}" "\${REMOTE_PYTHON}" "\${REMOTE_DIR}/app.py" >/tmp/courtvision-backend.log 2>&1 &
 echo \$! >/tmp/courtvision-backend.pid
 
 for attempt in \$(seq 1 ${HEALTH_TIMEOUT_SECONDS}); do
   HTTP_CODE=\$(curl -sS -m 5 -o /tmp/courtvision-backend-status.json -w '%{http_code}' "http://127.0.0.1:\${PORT}/status" || true)
   if [[ "\${HTTP_CODE}" == "200" ]]; then
-    python3 - <<'PY'
+    "\${REMOTE_PYTHON}" - <<'PY'
 import json
 from pathlib import Path
 
@@ -358,6 +465,50 @@ cat /tmp/courtvision-backend.log 2>/dev/null || true
 exit 1
 EOF
 )" || true
+
+if grep -q '^VENV_CREATE_FAIL$' <<<"${START_OUTPUT}"; then
+  fail_deploy \
+    "virtual environment creation" \
+    "python3 -m venv ${REMOTE_VENV}" \
+    "failed" \
+    "$(echo "${START_OUTPUT}" | tail -n 20)"
+  exit 1
+fi
+
+if grep -q '^VENV_PYTHON_MISSING$' <<<"${START_OUTPUT}"; then
+  fail_deploy \
+    "virtual environment python" \
+    "${REMOTE_PYTHON}" \
+    "missing" \
+    "venv python binary not found or not executable"
+  exit 1
+fi
+
+if grep -q '^PIP_UPGRADE_FAIL$' <<<"${START_OUTPUT}"; then
+  fail_deploy \
+    "pip upgrade" \
+    "python -m pip install --upgrade pip" \
+    "failed" \
+    "$(echo "${START_OUTPUT}" | tail -n 20)"
+  exit 1
+fi
+
+if grep -q '^REQUIREMENTS_INSTALL_FAIL$' <<<"${START_OUTPUT}"; then
+  fail_deploy \
+    "requirements installation" \
+    "pip install -r requirements.txt" \
+    "failed" \
+    "$(echo "${START_OUTPUT}" | tail -n 20)"
+  exit 1
+fi
+
+while IFS= read -r line; do
+  case "${line}" in
+    PYTHON_WHICH=*|PYTHON_VERSION=*|PIP_VERSION=*|VENV_*|PIP_*|REQUIREMENTS_*)
+      log "${line}"
+      ;;
+  esac
+done <<<"${START_OUTPUT}"
 
 if ! grep -q '^FLASK_STARTED_OK$' <<<"${START_OUTPUT}"; then
   fail_deploy \
