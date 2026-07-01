@@ -51,13 +51,17 @@ End-to-end path: Phone UI → Expo → HTTP → Flask → Recording manager → 
 
 `activeRecordingId`, `activeRecordingFilename`, and `recordingStartedAt` are present only while `recordingActive` is `true`.
 
-### `POST /recording/start` (unchanged shape; new pre-checks)
+### `POST /recording/start` (camera pre-checks before any recording state)
 
-**Pre-checks (fail before processes start):**
+**Order of checks (all must pass before `begin_recording()`, `rpicam-vid`, or `ffmpeg` start):**
 
-1. Camera detected via `rpicam-hello` / `rpicam-vid --list-cameras`
-2. `/tmp` free space ≥ `RECORDING_MIN_TMP_FREE_BYTES`
-3. `rpicam-vid` and `ffmpeg` on PATH
+1. No recording already active → else busy
+2. Camera detected via `rpicam-hello` / `rpicam-vid --list-cameras`
+3. `/tmp` free space ≥ `RECORDING_MIN_TMP_FREE_BYTES`
+4. `rpicam-vid` and `ffmpeg` on PATH
+5. `begin_recording()` only after checks 1–4 pass
+6. Start `rpicam-vid`, verify alive (250 ms), then start `ffmpeg`
+7. 2s watchdog — both processes must remain alive
 
 **Success (HTTP 200):**
 
@@ -74,19 +78,30 @@ End-to-end path: Phone UI → Expo → HTTP → Flask → Recording manager → 
 }
 ```
 
-**Failure examples (HTTP 500):**
+**Camera failure responses (exact messages):**
+
+| Condition | HTTP | Response |
+|-----------|------|----------|
+| Camera module not detected | 500 | `{ "success": false, "message": "Raspberry Pi camera not detected." }` |
+| Camera already busy (recording active or conflict) | 409 | `{ "success": false, "message": "Raspberry Pi camera is busy." }` |
+| `rpicam-vid` / watchdog init failed | 500 | `{ "success": false, "message": "Failed to initialize Raspberry Pi camera." }` |
+
+**Other failure (HTTP 500):**
 
 ```json
 { "success": false, "message": "Insufficient storage on Raspberry Pi." }
 ```
 
-```json
-{ "success": false, "message": "Raspberry Pi camera is not detected. Connect Camera Module 3 and reboot if needed." }
-```
+**Pre-start verification checks:**
 
-```json
-{ "success": false, "message": "Recording pipeline failed to start. rpicam-vid exited with code 1 ..." }
-```
+| Check | Pass | Fail message |
+|-------|------|--------------|
+| `rpicam-hello --list-cameras` or `rpicam-vid --list-cameras` reports camera | continue | `Raspberry Pi camera not detected.` |
+| No active recording / not in `RECORDING` state | continue | `Raspberry Pi camera is busy.` |
+| `/tmp` free ≥ 200 MB (default) | continue | `Insufficient storage on Raspberry Pi.` |
+| `rpicam-vid` alive 250 ms after spawn | start ffmpeg | `Failed to initialize Raspberry Pi camera.` |
+| Both processes alive after 2s watchdog | return success | `Failed to initialize Raspberry Pi camera.` |
+| `cameraState` after failed start | `IDLE` | no `recordingActive`, no persisted state file |
 
 ### `POST /recording/stop` (extended validation)
 
@@ -154,13 +169,15 @@ End-to-end path: Phone UI → Expo → HTTP → Flask → Recording manager → 
 ### Start
 
 1. No active recording / not finalizing
-2. Camera available
-3. `/tmp` free ≥ minimum
-4. Commands available
-5. Start `rpicam-vid` → `ffmpeg`
-6. Sleep 2s → both processes alive
-7. Persist PIDs to `/tmp/courtvision-active-recording.json`
-8. Start max-duration timer
+2. Camera not busy
+3. Camera detected (`verify_camera_available`)
+4. `/tmp` free ≥ minimum
+5. Commands available
+6. `begin_recording()` — only after steps 1–5
+7. Start `rpicam-vid` → verify alive 250 ms → start `ffmpeg`
+8. Sleep 2s → both processes alive
+9. Persist PIDs to `/tmp/courtvision-active-recording.json`
+10. Start max-duration timer
 
 ### Stop
 
@@ -242,6 +259,36 @@ curl -s -X POST http://<pi-ip>:5000/recording/start
 | Logs | camera detected, free storage, PIDs |
 
 Wait 5 seconds. `GET /status` → `recordingActive: true`.
+
+### Step 2a — Camera not detected (optional negative test)
+
+Disconnect camera or disable in `raspi-config`, then:
+
+```bash
+curl -s -X POST http://<pi-ip>:5000/recording/start
+```
+
+| Check | Expected |
+|-------|----------|
+| HTTP | 500 |
+| `success` | `false` |
+| `message` | `Raspberry Pi camera not detected.` |
+| `recordingActive` | `false` |
+| Pi processes | no `rpicam-vid` / `ffmpeg` recording pair |
+
+### Step 2b — Camera busy (optional negative test)
+
+Start a recording, then while it is active:
+
+```bash
+curl -s -X POST http://<pi-ip>:5000/recording/start
+```
+
+| Check | Expected |
+|-------|----------|
+| HTTP | 409 |
+| `message` | `Raspberry Pi camera is busy.` |
+| `cameraState` | `RECORDING` (first recording unaffected) |
 
 ### Step 3 — Stop
 

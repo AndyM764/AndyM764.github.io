@@ -62,7 +62,9 @@ ACTIVE_RECORDING_STATE_FILE = Path(
     os.environ.get("COURTVISION_ACTIVE_RECORDING_STATE_FILE", "/tmp/courtvision-active-recording.json")
 )
 
-CAMERA_CONFLICT_MESSAGE = "Camera is currently in use by another process"
+CAMERA_CONFLICT_MESSAGE = "Raspberry Pi camera is busy."
+CAMERA_NOT_DETECTED_MESSAGE = "Raspberry Pi camera not detected."
+CAMERA_INITIALIZATION_FAILED_MESSAGE = "Failed to initialize Raspberry Pi camera."
 
 last_parameters: dict[str, Any] | None = None
 ball_machine_power: Literal["on", "off"] = "off"
@@ -75,6 +77,18 @@ class CameraState(str, Enum):
 
 
 class CameraConflictError(RuntimeError):
+    pass
+
+
+class CameraNotDetectedError(RuntimeError):
+    pass
+
+
+class CameraBusyError(RuntimeError):
+    pass
+
+
+class CameraInitializationError(RuntimeError):
     pass
 
 
@@ -214,9 +228,12 @@ def verify_camera_available() -> None:
                 check=False,
             )
         except (OSError, subprocess.SubprocessError) as error:
-            raise RuntimeError(
-                f"Unable to query Raspberry Pi camera availability using {command[0]}: {error}"
-            ) from error
+            logger.warning(
+                "Unable to query Raspberry Pi camera availability using %s: %s",
+                command[0],
+                error,
+            )
+            continue
 
         output = f"{completed.stdout}\n{completed.stderr}".strip()
         lowered = output.lower()
@@ -225,9 +242,7 @@ def verify_camera_available() -> None:
             continue
 
         if "no cameras available" in lowered:
-            raise RuntimeError(
-                "Raspberry Pi camera is not detected. Connect Camera Module 3 and reboot if needed."
-            )
+            raise CameraNotDetectedError(CAMERA_NOT_DETECTED_MESSAGE)
 
         if "available cameras" in lowered or "imx" in lowered or "/base/" in lowered:
             logger.info("Camera detected via %s: %s", command[0], output.replace("\n", " | "))
@@ -237,9 +252,7 @@ def verify_camera_available() -> None:
             logger.info("Camera detected via %s.", command[0])
             return
 
-    raise RuntimeError(
-        "Raspberry Pi camera is not detected. Verify Camera Module 3 is connected and enabled."
-    )
+    raise CameraNotDetectedError(CAMERA_NOT_DETECTED_MESSAGE)
 
 
 def verify_tmp_storage_available() -> int:
@@ -612,15 +625,24 @@ class DirectRecordingManager:
     def start(self) -> dict[str, Any]:
         with self._lock:
             if self._active_recording is not None:
-                raise RuntimeError("A recording is already in progress.")
+                raise CameraBusyError(CAMERA_CONFLICT_MESSAGE)
 
             if self._stopping:
                 raise RuntimeError("A recording is still finalizing. Wait before starting again.")
 
-            verify_camera_available()
-            free_storage_bytes = verify_tmp_storage_available()
-            validate_system_commands("rpicam-vid", "ffmpeg")
-            self._state_manager.begin_recording()
+        verify_camera_not_busy_for_recording()
+        verify_camera_available()
+        free_storage_bytes = verify_tmp_storage_available()
+        validate_system_commands("rpicam-vid", "ffmpeg")
+
+        with self._lock:
+            if self._active_recording is not None:
+                raise CameraBusyError(CAMERA_CONFLICT_MESSAGE)
+
+            try:
+                self._state_manager.begin_recording()
+            except CameraConflictError as error:
+                raise CameraBusyError(CAMERA_CONFLICT_MESSAGE) from error
 
             filename, output_path = build_recording_filename()
             recording_id = filename.removesuffix(".mp4")
@@ -666,7 +688,11 @@ class DirectRecordingManager:
                 capture_stderr("rpicam-vid", self._camera_process, self._process_errors)
 
                 if self._camera_process.stdout is None:
-                    raise RuntimeError("Unable to read rpicam-vid output.")
+                    raise CameraInitializationError(CAMERA_INITIALIZATION_FAILED_MESSAGE)
+
+                time.sleep(0.25)
+                if self._camera_process.poll() is not None:
+                    raise CameraInitializationError(CAMERA_INITIALIZATION_FAILED_MESSAGE)
 
                 self._ffmpeg_process = subprocess.Popen(
                     ffmpeg_command,
@@ -720,12 +746,19 @@ class DirectRecordingManager:
                     "ffmpegPid": self._ffmpeg_process.pid,
                     "startedAt": started_at,
                 }
-            except Exception:
+            except CameraInitializationError:
                 self._cancel_timeout_timer()
                 self._cleanup_processes_unlocked()
                 clear_active_recording_state()
                 self._state_manager.end_recording()
                 raise
+            except Exception as error:
+                self._cancel_timeout_timer()
+                self._cleanup_processes_unlocked()
+                clear_active_recording_state()
+                self._state_manager.end_recording()
+                logger.error("Failed to initialize Raspberry Pi camera: %s", error)
+                raise CameraInitializationError(CAMERA_INITIALIZATION_FAILED_MESSAGE) from error
 
     def stop(self, recording_id: str, *, timed_out: bool = False) -> tuple[Path, dict[str, Any]]:
         cached = self.get_finalized_recording(recording_id)
@@ -895,9 +928,12 @@ class DirectRecordingManager:
         if failed_processes:
             diagnostics = self._get_process_diagnostics()
             self._cleanup_processes()
-            raise RuntimeError(
-                "Recording pipeline failed to start. " + " ".join(failed_processes) + " " + diagnostics
+            logger.error(
+                "Recording pipeline failed to start: %s %s",
+                " ".join(failed_processes),
+                diagnostics,
             )
+            raise CameraInitializationError(CAMERA_INITIALIZATION_FAILED_MESSAGE)
 
     def _get_process_diagnostics(self) -> str:
         if not self._process_errors:
@@ -1095,6 +1131,14 @@ class HlsPreviewManager:
 recording_manager = DirectRecordingManager(camera_state_manager)
 preview_manager = HlsPreviewManager(camera_state_manager)
 recording_manager.recover_orphans()
+
+
+def verify_camera_not_busy_for_recording() -> None:
+    if recording_manager.is_recording:
+        raise CameraBusyError(CAMERA_CONFLICT_MESSAGE)
+
+    if camera_state_manager.state == CameraState.RECORDING:
+        raise CameraBusyError(CAMERA_CONFLICT_MESSAGE)
 
 
 def prepare_recording_camera() -> None:
@@ -1299,7 +1343,7 @@ def recording_start() -> tuple[Response, int] | Response:
             return jsonify(
                 {
                     "success": False,
-                    "message": "Recording processes did not stay running after start.",
+                    "message": CAMERA_INITIALIZATION_FAILED_MESSAGE,
                 }
             ), 500
 
@@ -1315,8 +1359,12 @@ def recording_start() -> tuple[Response, int] | Response:
                 "cameraState": camera_state_manager.state.value,
             }
         )
-    except CameraConflictError:
-        return camera_conflict_response()
+    except CameraNotDetectedError as error:
+        return jsonify({"success": False, "message": str(error)}), 500
+    except (CameraBusyError, CameraConflictError):
+        return jsonify({"success": False, "message": CAMERA_CONFLICT_MESSAGE}), 409
+    except CameraInitializationError as error:
+        return jsonify({"success": False, "message": str(error)}), 500
     except RuntimeError as error:
         return jsonify({"success": False, "message": str(error)}), 500
 
