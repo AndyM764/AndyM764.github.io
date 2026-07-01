@@ -2,148 +2,90 @@
 
 Single Flask backend at `backend/app.py` for the CourtVision mobile app.
 
-## Runtime requirements
+## One-command deploy (Mac)
+
+```sh
+cd CourtVision.V3/backend
+chmod +x deploy.sh verify.sh
+./deploy.sh andy76@<pi-ip>
+```
+
+That's it. No second path argument. No manual SSH.
+
+The script will:
+
+1. Auto-detect the local backend directory (the folder containing `deploy.sh`)
+2. Show a confirmation prompt with backend dir, Pi target, remote dir, and port
+3. Upload and health-check a staged build
+4. Backup the existing Pi backend to `/home/andy76/courtvision-backup-YYYYMMDD-HHMMSS`
+5. Deploy to `/home/andy76/courtvision/backend`
+6. Stop the old Flask process and start the new one on port `5000`
+7. Run `verify.sh` automatically
+
+Ends with:
+
+```txt
+========================================
+DEPLOY: PASS
+VERIFY: PASS
+========================================
+Rollback:
+  ssh andy76@<pi-ip> '...'
+```
+
+## Verify only
+
+```sh
+./verify.sh http://<pi-ip>:5000
+```
+
+Checks:
+
+- `GET /status` — `cameraState` in `IDLE|PREVIEW|RECORDING`, `cameraStateConsistent == true`
+- `GET /info` — `hostname` and `ip` present
+- `POST /camera/state`
+- `POST /recording/start` — if recording starts, validates process state and output file size
+- `POST /recording/stop`
+
+Every check prints:
+
+```txt
+PASS: GET /status — HTTP 200
+```
+
+or on failure:
+
+```txt
+FAIL: GET /status
+  endpoint: GET http://192.168.1.50:5000/status
+  HTTP status: 500
+  response body: {"success":false,"message":"..."}
+```
+
+## Phone app
+
+```sh
+cd CourtVision.V3
+EXPO_PUBLIC_RASPBERRY_PI_BASE_URL=http://<pi-ip>:5000 npm start
+```
+
+## Runtime requirements (Pi)
 
 - Raspberry Pi 5 with Camera Module
 - `rpicam-vid`
-- `ffmpeg` (`ffprobe` is optional)
+- `ffmpeg` (`ffprobe` optional — warn only if missing)
 - Python 3.11+
-
-Install system dependencies:
 
 ```sh
 sudo apt update
 sudo apt install -y ffmpeg
 ```
 
-Install Python dependencies:
+## Manual backend start (only if needed)
 
 ```sh
-cd backend
-python3 -m venv .venv
+ssh andy76@<pi-ip>
+cd /home/andy76/courtvision/backend
 . .venv/bin/activate
-pip install -r requirements.txt
-```
-
-Run:
-
-```sh
-python app.py
-```
-
-The server listens on `0.0.0.0:5000` by default.
-
-## Architecture
-
-V4 is recording-first with atomic camera state:
-
-| State | Meaning |
-|-------|---------|
-| `IDLE` | Camera not in use |
-| `PREVIEW` | HLS preview pipeline active |
-| `RECORDING` | Direct MP4 recording pipeline active |
-
-Only one state is allowed at a time. Conflicts return:
-
-```json
-{
-  "success": false,
-  "message": "Camera is currently in use by another process"
-}
-```
-
-## Safety guarantees
-
-- **Camera lock** is enforced in the backend, not the app.
-- **Recording deletion** only happens after the phone confirms a successful download via `DELETE /recordings/<filename>` with `{"downloaded": true}`.
-- **ffprobe** is optional. Recording success requires a non-empty MP4 file.
-- **Single backend**: startup fails if `camera_server.py` or duplicate `app.py` files exist.
-- **Safe deploy**: use `deploy.sh` to health-check staged backend before promotion.
-
-## Endpoints
-
-| Method | Path | Purpose |
-|--------|------|---------|
-| GET | `/info` | Pi hostname and IP for discovery |
-| GET | `/status` | Health, `cameraState`, and consistency check |
-| POST | `/data` | Receive tennis parameters |
-| POST | `/ball-machine/state` | Turn ball machine on or off |
-| POST | `/camera/state` | Enable or disable HLS preview |
-| GET | `/camera/stream.m3u8` | HLS playlist for Expo preview |
-| POST | `/recording/start` | Start direct MP4 recording |
-| POST | `/recording/stop` | Finalize MP4 and return download URL |
-| GET | `/recordings/<filename>.mp4` | Download recording to phone |
-| DELETE | `/recordings/<filename>.mp4` | Remove temp file after confirmed download |
-
-## Recording flow
-
-1. `POST /recording/start` → Pi records to temp directory
-2. `POST /recording/stop` → MP4 finalized (file must exist with size > 0)
-3. `GET /recordings/<filename>` → phone downloads MP4
-4. `DELETE /recordings/<filename>` with `{"downloaded": true}` → Pi deletes file
-
-If download fails, the file remains on the Pi for retry.
-
-## One-command deploy and verify (Mac)
-
-From your Mac, with SSH access to the Pi:
-
-```sh
-cd /Users/andymannikum/CourtVisionV4/CourtVision.V3/backend
-chmod +x deploy-courtvision-v4.sh verify-courtvision-v4.sh
-./deploy-courtvision-v4.sh andy76@<pi-ip>
-```
-
-This single command:
-
-1. Validates local `backend/app.py`
-2. Uploads to a staged directory on the Pi
-3. Health-checks the staged backend on port `5001`
-4. Promotes files to `~/courtvision/backend`
-5. Stops any old Flask process and starts production Flask on port `5000`
-6. Runs `verify-courtvision-v4.sh` against the Pi
-
-Environment overrides:
-
-```sh
-export COURTVISION_BACKEND_DIR=/Users/andymannikum/CourtVisionV4/CourtVision.V3/backend
-export COURTVISION_PI_TARGET=andy76@192.168.1.50
-export COURTVISION_REMOTE_DIR=~/courtvision/backend
-export COURTVISION_PORT=5000
-./deploy-courtvision-v4.sh
-```
-
-Verify only (without redeploying):
-
-```sh
-./verify-courtvision-v4.sh http://<pi-ip>:5000
-```
-
-Each script ends with a clear summary:
-
-```txt
-PASS: Flask started
-PASS: /status OK
-PASS: /info OK
-...
-DEPLOY: PASS
-VERIFY: PASS
-```
-
-or `FAIL` with endpoint, HTTP status, and response body.
-
-The deploy script asks for confirmation before proceeding and creates a rollback backup at `~/courtvision-backup-YYYYMMDD-HHMMSS` before replacing the live backend.
-
-## Safe deployment (staged only)
-
-The older staged deploy script remains available:
-
-```sh
-./deploy.sh andy76@<pi-ip> ~/courtvision/backend
-```
-
-Set the phone app bootstrap URL:
-
-```txt
-EXPO_PUBLIC_RASPBERRY_PI_BASE_URL=http://<pi-ip>:5000
+PORT=5000 python app.py
 ```

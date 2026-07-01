@@ -268,6 +268,24 @@ class DirectRecordingManager:
         with self._lock:
             return self._active_recording is not None
 
+    def processes_running(self) -> bool:
+        with self._lock:
+            return (
+                self._camera_process is not None
+                and self._camera_process.poll() is None
+                and self._ffmpeg_process is not None
+                and self._ffmpeg_process.poll() is None
+            )
+
+    def force_abort(self) -> None:
+        with self._lock:
+            self._active_recording = None
+
+        self._cleanup_processes()
+
+        if self._state_manager.state == CameraState.RECORDING:
+            self._state_manager.end_recording()
+
     def start(self) -> str:
         with self._lock:
             if self._active_recording is not None:
@@ -798,10 +816,22 @@ def recording_start() -> tuple[Response, int] | Response:
 
     try:
         recording_id = recording_manager.start()
+
+        if not recording_manager.processes_running():
+            recording_manager.force_abort()
+            return jsonify(
+                {
+                    "success": False,
+                    "message": "Recording processes did not stay running after start.",
+                }
+            ), 500
+
         return jsonify(
             {
                 "success": True,
                 "recordingId": recording_id,
+                "processesRunning": True,
+                "recordingActive": True,
                 "cameraState": camera_state_manager.state.value,
             }
         )
@@ -826,6 +856,15 @@ def recording_stop() -> tuple[Response, int] | Response:
     try:
         mp4_path = recording_manager.stop(recording_id)
         filename = mp4_path.name
+        file_size = mp4_path.stat().st_size
+
+        if file_size <= 0:
+            return jsonify(
+                {
+                    "success": False,
+                    "message": "Recording file was created but has zero size.",
+                }
+            ), 500
 
         return jsonify(
             {
@@ -833,6 +872,7 @@ def recording_stop() -> tuple[Response, int] | Response:
                 "recordingId": recording_id,
                 "downloadUrl": f"/recordings/{filename}",
                 "filename": filename,
+                "fileSize": file_size,
                 "cameraState": camera_state_manager.state.value,
             }
         )
