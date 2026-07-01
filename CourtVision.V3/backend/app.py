@@ -49,6 +49,15 @@ RECORDING_FILE_STABLE_TIMEOUT_SECONDS = float(
     os.environ.get("COURTVISION_RECORDING_FILE_STABLE_TIMEOUT", "15")
 )
 MIN_MP4_SIZE_WITHOUT_FFPROBE = int(os.environ.get("COURTVISION_MIN_MP4_SIZE_WITHOUT_FFPROBE", str(100 * 1024)))
+RECORDING_MIN_TMP_FREE_BYTES = int(
+    os.environ.get("COURTVISION_RECORDING_MIN_TMP_FREE_BYTES", str(200 * 1024 * 1024))
+)
+RECORDING_MAX_DURATION_SECONDS = float(
+    os.environ.get("COURTVISION_RECORDING_MAX_DURATION_SECONDS", "600")
+)
+RECORDING_DURATION_TOLERANCE_SECONDS = float(
+    os.environ.get("COURTVISION_RECORDING_DURATION_TOLERANCE_SECONDS", "3.0")
+)
 ACTIVE_RECORDING_STATE_FILE = Path(
     os.environ.get("COURTVISION_ACTIVE_RECORDING_STATE_FILE", "/tmp/courtvision-active-recording.json")
 )
@@ -233,6 +242,17 @@ def verify_camera_available() -> None:
     )
 
 
+def verify_tmp_storage_available() -> int:
+    usage = shutil.disk_usage("/tmp")
+    free_bytes = usage.free
+    logger.info("Free storage in /tmp: %d bytes (required minimum %d bytes)", free_bytes, RECORDING_MIN_TMP_FREE_BYTES)
+
+    if free_bytes < RECORDING_MIN_TMP_FREE_BYTES:
+        raise RuntimeError("Insufficient storage on Raspberry Pi.")
+
+    return free_bytes
+
+
 def wait_for_file_stable(mp4_path: Path, timeout_seconds: float = RECORDING_FILE_STABLE_TIMEOUT_SECONDS) -> int:
     deadline = time.monotonic() + timeout_seconds
     stable_count = 0
@@ -365,6 +385,7 @@ def validate_mp4(mp4_path: Path) -> dict[str, Any]:
         "ffprobeAvailable": shutil.which("ffprobe") is not None,
         "duration": None,
         "validVideoStream": None,
+        "videoStreamCount": None,
         "passed": True,
     }
 
@@ -409,13 +430,27 @@ def validate_mp4(mp4_path: Path) -> dict[str, Any]:
         "default=noprint_wrappers=1:nokey=1",
         str(mp4_path),
     ]
+    video_stream_count_command = [
+        "ffprobe",
+        "-v",
+        "error",
+        "-select_streams",
+        "v",
+        "-show_entries",
+        "stream=codec_type",
+        "-of",
+        "default=noprint_wrappers=1:nokey=1",
+        str(mp4_path),
+    ]
 
     try:
         duration_result = subprocess.run(duration_command, capture_output=True, text=True, check=False)
         stream_result = subprocess.run(stream_command, capture_output=True, text=True, check=False)
+        video_stream_count_result = subprocess.run(
+            video_stream_count_command, capture_output=True, text=True, check=False
+        )
     except (OSError, subprocess.SubprocessError) as error:
-        logger.warning("ffprobe validation skipped due to execution error: %s", error)
-        return result
+        raise RuntimeError(f"Recording MP4 ffprobe validation failed: {error}") from error
 
     if duration_result.returncode != 0:
         raise RuntimeError(
@@ -426,6 +461,25 @@ def validate_mp4(mp4_path: Path) -> dict[str, Any]:
     if stream_result.returncode != 0 or stream_result.stdout.strip() != "video":
         raise RuntimeError(
             "Recording MP4 does not contain a valid H.264 video stream for mobile playback."
+        )
+
+    video_streams = [
+        line.strip()
+        for line in video_stream_count_result.stdout.splitlines()
+        if line.strip() == "video"
+    ]
+    video_stream_count = len(video_streams)
+    result["videoStreamCount"] = video_stream_count
+
+    if video_stream_count_result.returncode != 0:
+        raise RuntimeError(
+            "Recording MP4 failed ffprobe video stream count validation: "
+            f"{video_stream_count_result.stderr.strip() or 'unknown ffprobe error'}"
+        )
+
+    if video_stream_count != 1:
+        raise RuntimeError(
+            f"Recording MP4 must contain exactly one video stream, found {video_stream_count}."
         )
 
     try:
@@ -439,12 +493,30 @@ def validate_mp4(mp4_path: Path) -> dict[str, Any]:
     result["duration"] = duration
     result["validVideoStream"] = True
     logger.info(
-        "ffprobe validation passed for %s (duration=%.3fs, size=%d bytes)",
+        "ffprobe validation passed for %s (duration=%.3fs, size=%d bytes, video_streams=%d)",
         mp4_path,
         duration,
         file_size,
+        video_stream_count,
     )
     return result
+
+
+def verify_recording_duration(recording_duration_seconds: float, validation: dict[str, Any]) -> None:
+    if not validation.get("ffprobeAvailable"):
+        return
+
+    video_duration = validation.get("duration")
+    if not isinstance(video_duration, (int, float)) or video_duration <= 0:
+        raise RuntimeError("Recording MP4 duration must be greater than zero.")
+
+    delta = abs(recording_duration_seconds - float(video_duration))
+    if delta > RECORDING_DURATION_TOLERANCE_SECONDS:
+        raise RuntimeError(
+            "Recording duration mismatch: "
+            f"recorded {recording_duration_seconds:.2f}s but MP4 duration is {float(video_duration):.2f}s "
+            f"(tolerance {RECORDING_DURATION_TOLERANCE_SECONDS:.1f}s)."
+        )
 
 
 def build_recording_filename() -> tuple[str, Path]:
@@ -465,11 +537,32 @@ class DirectRecordingManager:
         self._ffmpeg_process: subprocess.Popen[bytes] | None = None
         self._process_errors: list[str] = []
         self._stopping = False
+        self._timeout_timer: threading.Timer | None = None
+        self._finalized_recordings: dict[str, dict[str, Any]] = {}
 
     @property
     def is_recording(self) -> bool:
         with self._lock:
             return self._active_recording is not None
+
+    def get_active_recording(self) -> dict[str, Any] | None:
+        with self._lock:
+            if self._active_recording is None:
+                return None
+
+            return {
+                "recordingId": self._active_recording["recording_id"],
+                "filename": self._active_recording["filename"],
+                "startedAt": self._active_recording.get("started_at"),
+            }
+
+    def get_finalized_recording(self, recording_id: str) -> dict[str, Any] | None:
+        with self._lock:
+            return self._finalized_recordings.get(recording_id)
+
+    def clear_finalized_recording(self, recording_id: str) -> None:
+        with self._lock:
+            self._finalized_recordings.pop(recording_id, None)
 
     def recover_orphans(self) -> None:
         terminate_orphan_recording_processes()
@@ -509,6 +602,7 @@ class DirectRecordingManager:
             self._active_recording = None
             self._stopping = False
 
+        self._cancel_timeout_timer()
         self._cleanup_processes()
         clear_active_recording_state()
 
@@ -524,6 +618,7 @@ class DirectRecordingManager:
                 raise RuntimeError("A recording is still finalizing. Wait before starting again.")
 
             verify_camera_available()
+            free_storage_bytes = verify_tmp_storage_available()
             validate_system_commands("rpicam-vid", "ffmpeg")
             self._state_manager.begin_recording()
 
@@ -605,12 +700,16 @@ class DirectRecordingManager:
                     }
                 )
 
+                self._schedule_timeout_timer(recording_id)
+
                 logger.info(
-                    "Recording started id=%s path=%s camera_pid=%s ffmpeg_pid=%s",
+                    "Recording started id=%s path=%s started_at=%s camera_pid=%s ffmpeg_pid=%s free_storage=%d",
                     recording_id,
                     output_path,
+                    datetime.fromtimestamp(started_at, tz=timezone.utc).isoformat(),
                     self._camera_process.pid,
                     self._ffmpeg_process.pid,
+                    free_storage_bytes,
                 )
 
                 return {
@@ -619,14 +718,21 @@ class DirectRecordingManager:
                     "outputPath": str(output_path),
                     "cameraPid": self._camera_process.pid,
                     "ffmpegPid": self._ffmpeg_process.pid,
+                    "startedAt": started_at,
                 }
             except Exception:
+                self._cancel_timeout_timer()
                 self._cleanup_processes_unlocked()
                 clear_active_recording_state()
                 self._state_manager.end_recording()
                 raise
 
-    def stop(self, recording_id: str) -> tuple[Path, dict[str, Any]]:
+    def stop(self, recording_id: str, *, timed_out: bool = False) -> tuple[Path, dict[str, Any]]:
+        cached = self.get_finalized_recording(recording_id)
+        if cached is not None:
+            logger.info("Returning cached finalized recording id=%s", recording_id)
+            return Path(cached["outputPath"]), cached["details"]
+
         with self._lock:
             if self._stopping:
                 raise RuntimeError("Recording stop is already in progress.")
@@ -643,9 +749,10 @@ class DirectRecordingManager:
             self._stopping = True
             self._active_recording = None
 
-        logger.info("Recording stop requested id=%s path=%s", recording_id, output_path)
+        logger.info("Recording stop requested id=%s path=%s timed_out=%s", recording_id, output_path, timed_out)
 
         try:
+            self._cancel_timeout_timer()
             terminate_process(self._camera_process)
             self._camera_process = None
 
@@ -682,6 +789,7 @@ class DirectRecordingManager:
             validation = validate_mp4(output_path)
             file_size = output_path.stat().st_size
             recording_duration_seconds = max(0.0, time.time() - started_at)
+            verify_recording_duration(recording_duration_seconds, validation)
 
             if file_size != stable_size:
                 logger.warning(
@@ -693,26 +801,73 @@ class DirectRecordingManager:
 
             clear_active_recording_state()
 
+            details: dict[str, Any] = {
+                "filename": filename,
+                "fileSize": file_size,
+                "recordingDurationSeconds": recording_duration_seconds,
+                "validation": validation,
+                "outputPath": str(output_path),
+            }
+
+            if timed_out and RECORDING_MAX_DURATION_SECONDS > 0:
+                details["timedOut"] = True
+                details["message"] = (
+                    f"Recording stopped automatically after reaching maximum duration of "
+                    f"{int(RECORDING_MAX_DURATION_SECONDS)} seconds."
+                )
+                with self._lock:
+                    self._finalized_recordings[recording_id] = {
+                        "outputPath": str(output_path),
+                        "details": details,
+                    }
+
             logger.info(
-                "Recording stopped id=%s path=%s duration=%.2fs final_size=%d bytes validation=%s",
+                "Recording stopped id=%s path=%s duration=%.2fs final_size=%d bytes validation=%s timed_out=%s",
                 recording_id,
                 output_path,
                 recording_duration_seconds,
                 file_size,
                 validation,
+                timed_out,
             )
-            return output_path, {
-                "filename": filename,
-                "fileSize": file_size,
-                "recordingDurationSeconds": recording_duration_seconds,
-                "validation": validation,
-            }
+            return output_path, details
         except Exception:
             clear_active_recording_state()
             raise
         finally:
             with self._lock:
                 self._stopping = False
+
+    def _schedule_timeout_timer(self, recording_id: str) -> None:
+        self._cancel_timeout_timer()
+
+        if RECORDING_MAX_DURATION_SECONDS <= 0:
+            return
+
+        def on_timeout() -> None:
+            try:
+                logger.warning(
+                    "Recording maximum duration exceeded id=%s limit=%.0fs",
+                    recording_id,
+                    RECORDING_MAX_DURATION_SECONDS,
+                )
+                self.stop(recording_id, timed_out=True)
+            except Exception as error:
+                logger.error(
+                    "Failed to auto-stop recording after timeout id=%s: %s",
+                    recording_id,
+                    error,
+                )
+                self.force_abort()
+
+        self._timeout_timer = threading.Timer(RECORDING_MAX_DURATION_SECONDS, on_timeout)
+        self._timeout_timer.daemon = True
+        self._timeout_timer.start()
+
+    def _cancel_timeout_timer(self) -> None:
+        if self._timeout_timer is not None:
+            self._timeout_timer.cancel()
+            self._timeout_timer = None
 
     def _cleanup_processes(self) -> None:
         with self._lock:
@@ -983,16 +1138,23 @@ def status() -> Response:
         or (camera_state == CameraState.RECORDING.value and recording_manager.is_recording and not preview_manager.enabled)
     )
 
-    return jsonify(
-        {
-            "status": "ok",
-            "cameraState": camera_state,
-            "cameraStateConsistent": state_consistent,
-            "cameraPreviewEnabled": preview_manager.enabled,
-            "recordingActive": recording_manager.is_recording,
-            "ballMachinePower": ball_machine_power,
-        }
-    )
+    payload: dict[str, Any] = {
+        "status": "ok",
+        "cameraState": camera_state,
+        "cameraStateConsistent": state_consistent,
+        "cameraPreviewEnabled": preview_manager.enabled,
+        "recordingActive": recording_manager.is_recording,
+        "ballMachinePower": ball_machine_power,
+        "maxRecordingDurationSeconds": RECORDING_MAX_DURATION_SECONDS,
+    }
+
+    active_recording = recording_manager.get_active_recording()
+    if active_recording is not None:
+        payload["activeRecordingId"] = active_recording["recordingId"]
+        payload["activeRecordingFilename"] = active_recording["filename"]
+        payload["recordingStartedAt"] = active_recording.get("startedAt")
+
+    return jsonify(payload)
 
 
 @app.post("/data")
@@ -1176,18 +1338,25 @@ def recording_stop() -> tuple[Response, int] | Response:
         filename = details["filename"]
         file_size = details["fileSize"]
 
-        return jsonify(
-            {
-                "success": True,
-                "recordingId": recording_id,
-                "downloadUrl": f"/recordings/{filename}",
-                "filename": filename,
-                "fileSize": file_size,
-                "recordingDurationSeconds": details["recordingDurationSeconds"],
-                "validation": details["validation"],
-                "cameraState": camera_state_manager.state.value,
-            }
-        )
+        response_payload: dict[str, Any] = {
+            "success": True,
+            "recordingId": recording_id,
+            "downloadUrl": f"/recordings/{filename}",
+            "filename": filename,
+            "fileSize": file_size,
+            "recordingDurationSeconds": details["recordingDurationSeconds"],
+            "validation": details["validation"],
+            "cameraState": camera_state_manager.state.value,
+        }
+
+        if details.get("timedOut") is True:
+            response_payload["timedOut"] = True
+
+        if isinstance(details.get("message"), str):
+            response_payload["message"] = details["message"]
+
+        recording_manager.clear_finalized_recording(recording_id)
+        return jsonify(response_payload)
     except RuntimeError as error:
         return jsonify({"success": False, "message": str(error)}), 500
 
@@ -1215,9 +1384,12 @@ def recording_download(filename: str) -> tuple[Response, int] | Response:
         mimetype="video/mp4",
     )
     response.headers["Cache-Control"] = "no-store"
-    response.call_on_close(
-        lambda: logger.info("Download completed filename=%s size=%d", filename, file_size)
-    )
+    response.headers["Content-Length"] = str(file_size)
+
+    def log_download_complete() -> None:
+        logger.info("Download completed filename=%s download_size=%d", filename, file_size)
+
+    response.call_on_close(log_download_complete)
     return response
 
 
@@ -1240,7 +1412,7 @@ def recording_delete(filename: str) -> tuple[Response, int] | Response:
     except FileNotFoundError:
         return jsonify({"success": False, "message": "Recording was not found."}), 404
 
-    logger.info("Recording deleted from Pi filename=%s", filename)
+    logger.info("Cleanup result=success filename=%s", filename)
     return jsonify({"success": True, "message": "Recording deleted from Raspberry Pi."})
 
 

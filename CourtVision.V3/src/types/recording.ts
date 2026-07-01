@@ -14,6 +14,7 @@ export type RecordingValidation = {
   ffprobeAvailable: boolean;
   duration?: number | null;
   validVideoStream?: boolean | null;
+  videoStreamCount?: number | null;
   passed: boolean;
   warning?: string;
 };
@@ -26,6 +27,7 @@ export type StopRecordingResponse = {
   fileSize: number;
   recordingDurationSeconds?: number;
   validation?: RecordingValidation;
+  timedOut?: boolean;
   message?: string;
 };
 

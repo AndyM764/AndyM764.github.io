@@ -1,7 +1,7 @@
-import { useCallback, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 
 import { raspberryPiService } from "../services/RaspberryPiService";
-import type { RecordingState, SavedVideo } from "../types/recording";
+import type { RecordingState, SavedVideo, StopRecordingResponse } from "../types/recording";
 
 type UseRecordingStateResult = {
   recordingState: RecordingState;
@@ -18,6 +18,33 @@ export function useRecordingState(): UseRecordingStateResult {
   const [lastSavedVideo, setLastSavedVideo] = useState<SavedVideo | null>(null);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const stopInProgressRef = useRef(false);
+  const recoveryAttemptedRef = useRef(false);
+  const pendingFinalizeRef = useRef<StopRecordingResponse | null>(null);
+
+  useEffect(() => {
+    if (recoveryAttemptedRef.current) {
+      return;
+    }
+
+    recoveryAttemptedRef.current = true;
+
+    void (async () => {
+      try {
+        const activeRecording = await raspberryPiService.recoverActiveRecordingFromStatus();
+        if (!activeRecording) {
+          return;
+        }
+
+        setRecordingId(activeRecording.recordingId);
+        setRecordingState("recording");
+        setErrorMessage(null);
+      } catch (error) {
+        setErrorMessage(
+          error instanceof Error ? error.message : "Unable to recover recording state from Pi."
+        );
+      }
+    })();
+  }, []);
 
   const startRecording = useCallback(async () => {
     if (recordingState === "recording" || recordingState === "saving") {
@@ -44,7 +71,8 @@ export function useRecordingState(): UseRecordingStateResult {
       return;
     }
 
-    if (!recordingId) {
+    const pendingFinalize = pendingFinalizeRef.current;
+    if (!recordingId && !pendingFinalize) {
       setErrorMessage("No active recording ID is available.");
       return;
     }
@@ -53,10 +81,13 @@ export function useRecordingState(): UseRecordingStateResult {
     setRecordingState("saving");
     setErrorMessage(null);
 
-    const activeRecordingId = recordingId;
+    const activeRecordingId = recordingId ?? pendingFinalize?.recordingId ?? null;
 
     try {
-      const stopResponse = await raspberryPiService.stopRecording(activeRecordingId);
+      const stopResponse =
+        pendingFinalize ?? (await raspberryPiService.stopRecording(activeRecordingId!));
+      pendingFinalizeRef.current = stopResponse;
+
       const savedVideo = await raspberryPiService.downloadRecording(
         stopResponse.downloadUrl,
         stopResponse.filename,
@@ -75,6 +106,7 @@ export function useRecordingState(): UseRecordingStateResult {
 
       setLastSavedVideo(savedVideo);
       setRecordingId(null);
+      pendingFinalizeRef.current = null;
       setRecordingState("idle");
 
       if (stopResponse.filename && savedVideo.path && savedVideo.size > 0) {
@@ -87,8 +119,11 @@ export function useRecordingState(): UseRecordingStateResult {
         }
       }
     } catch (error) {
-      setRecordingState("idle");
-      setErrorMessage(error instanceof Error ? error.message : "Unable to stop recording.");
+      setRecordingState(pendingFinalizeRef.current ? "saving" : recordingId ? "recording" : "idle");
+      const baseMessage = error instanceof Error ? error.message : "Unable to stop recording.";
+      setErrorMessage(
+        `${baseMessage} The recording file remains on the Raspberry Pi and can be retried.`
+      );
     } finally {
       stopInProgressRef.current = false;
     }

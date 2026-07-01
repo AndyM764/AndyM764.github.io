@@ -9,6 +9,10 @@ export type PiStatusResponse = {
   cameraStateConsistent?: boolean;
   cameraPreviewEnabled?: boolean;
   recordingActive?: boolean;
+  activeRecordingId?: string;
+  activeRecordingFilename?: string;
+  recordingStartedAt?: number;
+  maxRecordingDurationSeconds?: number;
   ballMachinePower?: BallMachinePower;
 };
 

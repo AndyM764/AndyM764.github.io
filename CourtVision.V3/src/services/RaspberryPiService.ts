@@ -115,6 +115,18 @@ class RaspberryPiService {
           : undefined,
       recordingActive:
         typeof response.recordingActive === "boolean" ? response.recordingActive : undefined,
+      activeRecordingId:
+        typeof response.activeRecordingId === "string" ? response.activeRecordingId.trim() : undefined,
+      activeRecordingFilename:
+        typeof response.activeRecordingFilename === "string"
+          ? response.activeRecordingFilename.trim()
+          : undefined,
+      recordingStartedAt:
+        typeof response.recordingStartedAt === "number" ? response.recordingStartedAt : undefined,
+      maxRecordingDurationSeconds:
+        typeof response.maxRecordingDurationSeconds === "number"
+          ? response.maxRecordingDurationSeconds
+          : undefined,
       ballMachinePower:
         response.ballMachinePower === "on" || response.ballMachinePower === "off"
           ? response.ballMachinePower
@@ -205,6 +217,11 @@ class RaspberryPiService {
       throw new Error("The Raspberry Pi finalized recording has an invalid file size.");
     }
 
+    const validation = this.parseRecordingValidation(response.validation);
+    if (validation && validation.passed !== true) {
+      throw new Error("The Raspberry Pi recording failed validation.");
+    }
+
     return {
       success: true,
       recordingId,
@@ -215,8 +232,29 @@ class RaspberryPiService {
         typeof response.recordingDurationSeconds === "number"
           ? response.recordingDurationSeconds
           : undefined,
-      validation: this.parseRecordingValidation(response.validation),
+      validation,
+      timedOut: response.timedOut === true,
       message: typeof response.message === "string" ? response.message : undefined
+    };
+  }
+
+  async recoverActiveRecordingFromStatus(): Promise<{
+    recordingId: string;
+    filename?: string;
+  } | null> {
+    const status = await this.getStatus();
+
+    if (status.recordingActive !== true) {
+      return null;
+    }
+
+    if (!status.activeRecordingId || status.activeRecordingId.length === 0) {
+      throw new Error("The Raspberry Pi reports an active recording without a recording ID.");
+    }
+
+    return {
+      recordingId: status.activeRecordingId,
+      filename: status.activeRecordingFilename
     };
   }
 
@@ -459,6 +497,8 @@ class RaspberryPiService {
       duration: typeof value.duration === "number" ? value.duration : null,
       validVideoStream:
         typeof value.validVideoStream === "boolean" ? value.validVideoStream : null,
+      videoStreamCount:
+        typeof value.videoStreamCount === "number" ? value.videoStreamCount : null,
       passed: value.passed,
       warning: typeof value.warning === "string" ? value.warning : undefined
     };

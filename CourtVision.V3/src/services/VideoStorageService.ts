@@ -57,6 +57,7 @@ class VideoStorageService {
         };
       } catch (error) {
         lastError = error instanceof Error ? error : new Error("Recording download failed.");
+        this.removePartialDownload(destination);
 
         if (attempt < maxAttempts) {
           await this.delay(raspberryPiConfig.downloadRetryDelayMs);
@@ -65,14 +66,33 @@ class VideoStorageService {
     }
 
     if (lastError?.name === "AbortError") {
-      throw new Error("Recording download timed out.");
+      throw new Error(
+        "Recording download timed out. The recording file remains on the Raspberry Pi and can be retried."
+      );
     }
 
     if (lastError?.message.includes("Network request failed")) {
-      throw new Error(`Recording download failed due to a network error: ${lastError.message}`);
+      throw new Error(
+        `Recording download failed due to a network error: ${lastError.message} The recording file remains on the Raspberry Pi and can be retried.`
+      );
     }
 
-    throw lastError ?? new Error("Recording download failed after all retry attempts.");
+    throw (
+      lastError ??
+      new Error(
+        "Recording download failed after all retry attempts. The recording file remains on the Raspberry Pi and can be retried."
+      )
+    );
+  }
+
+  private removePartialDownload(destination: File): void {
+    try {
+      if (destination.exists) {
+        destination.delete();
+      }
+    } catch {
+      // Best-effort cleanup before retry.
+    }
   }
 
   private getUniqueFilename(
