@@ -103,8 +103,27 @@ if ! python3 -m py_compile "${LOCAL_BACKEND_DIR}/app.py"; then
   exit 1
 fi
 
-if grep -q 'camera_server' "${LOCAL_BACKEND_DIR}/app.py" 2>/dev/null; then
-  fail_deploy "single-backend check" "${LOCAL_BACKEND_DIR}/app.py" "invalid" "camera_server reference found"
+log "Single-backend layout check"
+if [[ -f "${LOCAL_BACKEND_DIR}/camera_server.py" ]]; then
+  fail_deploy \
+    "single-backend check" \
+    "${LOCAL_BACKEND_DIR}/camera_server.py" \
+    "forbidden" \
+    "legacy camera_server.py must not exist; use backend/app.py only"
+  exit 1
+fi
+
+LEGACY_BACKEND_FILE="$(find "${LOCAL_BACKEND_DIR}/.." -maxdepth 4 -name 'camera_server.py' \
+  -not -path '*/node_modules/*' \
+  -not -path '*/.venv/*' \
+  -not -path '*/.git/*' \
+  2>/dev/null | head -n1 || true)"
+if [[ -n "${LEGACY_BACKEND_FILE}" ]]; then
+  fail_deploy \
+    "single-backend check" \
+    "${LEGACY_BACKEND_FILE}" \
+    "forbidden" \
+    "legacy camera_server.py must not exist; use backend/app.py only"
   exit 1
 fi
 

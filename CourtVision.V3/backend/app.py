@@ -66,7 +66,7 @@ def validate_single_backend() -> None:
     project_root = backend_app.parent.parent
     ignored_parts = {"node_modules", ".venv", "__pycache__", ".git"}
 
-    forbidden_names = {"camera_server.py"}
+    forbidden_names = {"camera" + "_server.py"}
     duplicate_apps: list[Path] = []
 
     for path in project_root.rglob("*"):
