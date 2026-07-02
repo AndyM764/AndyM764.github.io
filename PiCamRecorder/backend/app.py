@@ -13,12 +13,17 @@ PORT = 5000
 app = Flask(__name__)
 
 recording_lock = threading.Lock()
+monitor_lock = threading.Lock()
 state = {
     "recording": False,
+    "recordingFailed": False,
+    "recordingError": None,
     "filename": None,
     "rpicam_proc": None,
     "ffmpeg_proc": None,
 }
+monitor_stop_event = None
+monitor_thread = None
 
 diagnostics_lock = threading.Lock()
 diagnostics = {
@@ -106,15 +111,76 @@ def get_status_payload():
     results = run_diagnostics()
     with recording_lock:
         recording = state["recording"]
+        recording_failed = state["recordingFailed"]
+        recording_error = state["recordingError"]
 
-    return {
+    payload = {
         "success": True,
         "cameraAvailable": results["cameraAvailable"],
         "rpicamInstalled": results["rpicamInstalled"],
         "ffmpegInstalled": results["ffmpegInstalled"],
         "recordingDirectoryWritable": results["recordingDirectoryWritable"],
         "recording": recording,
+        "recordingFailed": recording_failed,
     }
+    if recording_failed and recording_error:
+        payload["recordingError"] = recording_error
+    return payload
+
+
+def stop_recording_monitor():
+    global monitor_stop_event, monitor_thread
+    with monitor_lock:
+        if monitor_stop_event:
+            monitor_stop_event.set()
+        if monitor_thread and monitor_thread.is_alive():
+            monitor_thread.join(timeout=2)
+        monitor_stop_event = None
+        monitor_thread = None
+
+
+def mark_recording_failed(reason="Recording failed"):
+    with recording_lock:
+        if not state["recording"]:
+            return
+        state["recording"] = False
+        state["recordingFailed"] = True
+        state["recordingError"] = reason
+        state["rpicam_proc"] = None
+        state["ffmpeg_proc"] = None
+    stop_recording_monitor()
+
+
+def recording_monitor_loop(stop_event):
+    while not stop_event.is_set():
+        if stop_event.wait(1):
+            return
+
+        with recording_lock:
+            if not state["recording"]:
+                return
+            rpicam_proc = state["rpicam_proc"]
+            ffmpeg_proc = state["ffmpeg_proc"]
+
+        if rpicam_proc is None or rpicam_proc.poll() is not None:
+            mark_recording_failed()
+            return
+        if ffmpeg_proc is None or ffmpeg_proc.poll() is not None:
+            mark_recording_failed()
+            return
+
+
+def start_recording_monitor():
+    global monitor_stop_event, monitor_thread
+    with monitor_lock:
+        stop_recording_monitor()
+        monitor_stop_event = threading.Event()
+        monitor_thread = threading.Thread(
+            target=recording_monitor_loop,
+            args=(monitor_stop_event,),
+            daemon=True,
+        )
+        monitor_thread.start()
 
 
 def recording_ready_message(results):
@@ -199,24 +265,29 @@ def start_recording():
             return jsonify({"success": False, "error": str(exc)}), 500
 
         state["recording"] = True
+        state["recordingFailed"] = False
+        state["recordingError"] = None
         state["filename"] = filename
         state["rpicam_proc"] = rpicam_proc
         state["ffmpeg_proc"] = ffmpeg_proc
 
-        return jsonify(
-            {
-                "success": True,
-                "recording": True,
-                "filename": filename,
-            }
-        )
+    start_recording_monitor()
+
+    return jsonify(
+        {
+            "success": True,
+            "recording": True,
+            "filename": filename,
+        }
+    )
 
 
 @app.route("/recording/stop", methods=["POST"])
 def stop_recording():
     with recording_lock:
         if not state["recording"]:
-            return jsonify({"success": False, "error": "Not recording"}), 400
+            error = state["recordingError"] or "Not recording"
+            return jsonify({"success": False, "error": error}), 400
 
         filename = state["filename"]
         filepath = os.path.join(RECORDINGS_DIR, filename)
@@ -224,9 +295,13 @@ def stop_recording():
         ffmpeg_proc = state["ffmpeg_proc"]
 
         state["recording"] = False
+        state["recordingFailed"] = False
+        state["recordingError"] = None
         state["rpicam_proc"] = None
         state["ffmpeg_proc"] = None
         state["filename"] = None
+
+    stop_recording_monitor()
 
     if rpicam_proc and rpicam_proc.poll() is None:
         rpicam_proc.terminate()

@@ -1,4 +1,4 @@
-import { useRef, useState, type RefObject } from 'react';
+import { useEffect, useRef, useState, type RefObject } from 'react';
 import {
   ActivityIndicator,
   Button,
@@ -332,6 +332,28 @@ export default function App() {
       setError(formatPlaybackError(error));
     }
   }
+
+  useEffect(() => {
+    if (appState !== 'RECORDING') {
+      return;
+    }
+
+    const intervalId = setInterval(async () => {
+      try {
+        const data = await fetchPiStatus();
+        setDiagnostics(parseDiagnostics(data));
+
+        if (data.recordingFailed || !data.recording) {
+          setStatusMessage(data.recordingError || 'Recording failed');
+          setAppState('CONNECTED');
+        }
+      } catch {
+        // Ignore transient poll failures while recording.
+      }
+    }, 1000);
+
+    return () => clearInterval(intervalId);
+  }, [appState]);
 
   const formatSize = (size: number | null) => {
     if (size === null) {
