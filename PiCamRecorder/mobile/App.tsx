@@ -14,6 +14,14 @@ import { StatusBar } from 'expo-status-bar';
 const PI_BASE_URL = 'http://10.136.19.4:5000';
 const SAVE_DIR = `${FileSystem.documentDirectory}PiCamRecorder/`;
 const DOWNLOAD_TIMEOUT_MS = 60_000;
+const DOWNLOAD_TIMEOUT_MESSAGE = 'Download timed out after 60 seconds';
+
+class DownloadTimeoutError extends Error {
+  constructor() {
+    super(DOWNLOAD_TIMEOUT_MESSAGE);
+    this.name = 'DownloadTimeoutError';
+  }
+}
 
 type AppState =
   | 'DISCONNECTED'
@@ -101,15 +109,47 @@ async function verifyVideoPlayback(
   await video.unloadAsync();
 }
 
+async function removeLocalFileIfExists(localPath: string) {
+  const info = await FileSystem.getInfoAsync(localPath);
+  if (info.exists) {
+    await FileSystem.deleteAsync(localPath, { idempotent: true });
+  }
+}
+
 async function downloadWithTimeout(remoteUrl: string, localPath: string) {
-  const downloadPromise = FileSystem.downloadAsync(remoteUrl, localPath);
+  const download = FileSystem.createDownloadResumable(remoteUrl, localPath);
+  let timeoutId: ReturnType<typeof setTimeout> | undefined;
+
+  const downloadPromise = download.downloadAsync();
   const timeoutPromise = new Promise<never>((_, reject) => {
-    setTimeout(() => {
-      reject(new Error('Download timed out after 60 seconds'));
+    timeoutId = setTimeout(async () => {
+      try {
+        await download.cancelAsync();
+      } catch {
+        // Ignore cancel errors after timeout.
+      }
+      await removeLocalFileIfExists(localPath);
+      reject(new DownloadTimeoutError());
     }, DOWNLOAD_TIMEOUT_MS);
   });
 
-  return Promise.race([downloadPromise, timeoutPromise]);
+  try {
+    const result = await Promise.race([downloadPromise, timeoutPromise]);
+    if (result === undefined) {
+      await removeLocalFileIfExists(localPath);
+      throw new DownloadTimeoutError();
+    }
+    return result;
+  } catch (error) {
+    if (!(error instanceof DownloadTimeoutError)) {
+      await removeLocalFileIfExists(localPath);
+    }
+    throw error;
+  } finally {
+    if (timeoutId !== undefined) {
+      clearTimeout(timeoutId);
+    }
+  }
 }
 
 function parseDiagnostics(data: {
