@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useRef, useState, type RefObject } from 'react';
 import {
   ActivityIndicator,
   Button,
@@ -34,7 +34,36 @@ function formatCheck(value: boolean) {
   return value ? 'OK' : 'FAIL';
 }
 
+async function verifyLocalFile(localPath: string) {
+  const info = await FileSystem.getInfoAsync(localPath);
+  if (!info.exists) {
+    throw new Error('Downloaded file is missing');
+  }
+  if (!('size' in info) || !info.size || info.size <= 0) {
+    throw new Error('Downloaded file is empty');
+  }
+  return info.size;
+}
+
+async function verifyVideoPlayback(
+  videoRef: RefObject<Video | null>,
+  localPath: string
+) {
+  const video = videoRef.current;
+  if (!video) {
+    throw new Error('Video player not ready');
+  }
+
+  const status = await video.loadAsync({ uri: localPath });
+  if (!status.isLoaded) {
+    throw new Error('Video failed to load');
+  }
+
+  await video.unloadAsync();
+}
+
 export default function App() {
+  const verifyVideoRef = useRef<Video>(null);
   const [connected, setConnected] = useState(false);
   const [recording, setRecording] = useState(false);
   const [diagnostics, setDiagnostics] = useState<PiDiagnostics>(EMPTY_DIAGNOSTICS);
@@ -140,14 +169,18 @@ export default function App() {
         localPath
       );
 
-      const info = await FileSystem.getInfoAsync(localPath);
-      if (!info.exists || !('size' in info) || !info.size || info.size <= 0) {
+      const localSize = await verifyLocalFile(localPath);
+
+      setSaveMessage('Verifying playback...');
+      try {
+        await verifyVideoPlayback(verifyVideoRef, localPath);
+      } catch {
         setSaveStatus('error');
-        setSaveMessage('Downloaded file is missing or empty');
+        setSaveMessage('Video playback verification failed');
         return;
       }
 
-      setFileSize(info.size);
+      setFileSize(localSize);
       setVideoUri(localPath);
       setSaveStatus('saved');
       setSaveMessage('Saved to phone');
@@ -247,6 +280,8 @@ export default function App() {
           style={styles.video}
         />
       )}
+
+      <Video ref={verifyVideoRef} style={styles.hiddenVideo} />
     </ScrollView>
   );
 }
@@ -279,5 +314,10 @@ const styles = StyleSheet.create({
     height: 240,
     marginTop: 24,
     backgroundColor: '#000',
+  },
+  hiddenVideo: {
+    width: 0,
+    height: 0,
+    position: 'absolute',
   },
 });
