@@ -13,8 +13,18 @@ import { StatusBar } from 'expo-status-bar';
 
 const PI_BASE_URL = 'http://10.136.19.4:5000';
 const SAVE_DIR = `${FileSystem.documentDirectory}PiCamRecorder/`;
+const DOWNLOAD_TIMEOUT_MS = 60_000;
 
-type SaveStatus = 'idle' | 'downloading' | 'saved' | 'error';
+type AppState =
+  | 'DISCONNECTED'
+  | 'CONNECTING'
+  | 'CONNECTED'
+  | 'RECORDING'
+  | 'STOPPING'
+  | 'DOWNLOADING'
+  | 'SAVING'
+  | 'READY'
+  | 'ERROR';
 
 type PiDiagnostics = {
   cameraAvailable: boolean;
@@ -30,8 +40,31 @@ const EMPTY_DIAGNOSTICS: PiDiagnostics = {
   recordingDirectoryWritable: false,
 };
 
+const BUSY_STATES: AppState[] = [
+  'CONNECTING',
+  'STOPPING',
+  'DOWNLOADING',
+  'SAVING',
+];
+
 function formatCheck(value: boolean) {
   return value ? 'OK' : 'FAIL';
+}
+
+async function fetchPiStatus() {
+  const response = await fetch(`${PI_BASE_URL}/status`);
+  const data = await response.json();
+  if (!data.success) {
+    throw new Error('Pi status check failed');
+  }
+  return data;
+}
+
+async function ensureSaveDir() {
+  const info = await FileSystem.getInfoAsync(SAVE_DIR);
+  if (!info.exists) {
+    await FileSystem.makeDirectoryAsync(SAVE_DIR, { intermediates: true });
+  }
 }
 
 async function verifyLocalFile(localPath: string) {
@@ -62,142 +95,159 @@ async function verifyVideoPlayback(
   await video.unloadAsync();
 }
 
+async function downloadWithTimeout(remoteUrl: string, localPath: string) {
+  const downloadPromise = FileSystem.downloadAsync(remoteUrl, localPath);
+  const timeoutPromise = new Promise<never>((_, reject) => {
+    setTimeout(() => {
+      reject(new Error('Download timed out after 60 seconds'));
+    }, DOWNLOAD_TIMEOUT_MS);
+  });
+
+  return Promise.race([downloadPromise, timeoutPromise]);
+}
+
+function parseDiagnostics(data: {
+  cameraAvailable?: boolean;
+  rpicamInstalled?: boolean;
+  ffmpegInstalled?: boolean;
+  recordingDirectoryWritable?: boolean;
+}): PiDiagnostics {
+  return {
+    cameraAvailable: !!data.cameraAvailable,
+    rpicamInstalled: !!data.rpicamInstalled,
+    ffmpegInstalled: !!data.ffmpegInstalled,
+    recordingDirectoryWritable: !!data.recordingDirectoryWritable,
+  };
+}
+
 export default function App() {
   const verifyVideoRef = useRef<Video>(null);
-  const [connected, setConnected] = useState(false);
-  const [recording, setRecording] = useState(false);
+  const [appState, setAppState] = useState<AppState>('DISCONNECTED');
   const [diagnostics, setDiagnostics] = useState<PiDiagnostics>(EMPTY_DIAGNOSTICS);
   const [filename, setFilename] = useState('');
   const [fileSize, setFileSize] = useState<number | null>(null);
-  const [saveStatus, setSaveStatus] = useState<SaveStatus>('idle');
-  const [saveMessage, setSaveMessage] = useState('');
+  const [statusMessage, setStatusMessage] = useState('');
   const [videoUri, setVideoUri] = useState<string | null>(null);
-  const [busy, setBusy] = useState(false);
 
-  async function ensureSaveDir() {
-    const info = await FileSystem.getInfoAsync(SAVE_DIR);
-    if (!info.exists) {
-      await FileSystem.makeDirectoryAsync(SAVE_DIR, { intermediates: true });
-    }
+  const isBusy = BUSY_STATES.includes(appState);
+  const recordingReady =
+    diagnostics.rpicamInstalled &&
+    diagnostics.ffmpegInstalled &&
+    diagnostics.recordingDirectoryWritable &&
+    diagnostics.cameraAvailable;
+  const showDiagnostics = !['DISCONNECTED', 'CONNECTING'].includes(appState);
+
+  function setError(message: string) {
+    setStatusMessage(message);
+    setAppState('ERROR');
   }
 
   async function handleConnect() {
-    setBusy(true);
-    setSaveStatus('idle');
-    setSaveMessage('');
+    setAppState('CONNECTING');
+    setStatusMessage('');
     try {
-      const response = await fetch(`${PI_BASE_URL}/status`);
-      const data = await response.json();
-      if (data.success) {
-        setConnected(true);
-        setRecording(!!data.recording);
-        setDiagnostics({
-          cameraAvailable: !!data.cameraAvailable,
-          rpicamInstalled: !!data.rpicamInstalled,
-          ffmpegInstalled: !!data.ffmpegInstalled,
-          recordingDirectoryWritable: !!data.recordingDirectoryWritable,
-        });
-      } else {
-        setConnected(false);
-        setDiagnostics(EMPTY_DIAGNOSTICS);
-        setSaveMessage('Connection failed');
+      const data = await fetchPiStatus();
+      setDiagnostics(parseDiagnostics(data));
+
+      if (data.recording) {
+        setAppState('RECORDING');
+        return;
       }
+
+      setAppState('CONNECTED');
     } catch {
-      setConnected(false);
       setDiagnostics(EMPTY_DIAGNOSTICS);
-      setSaveMessage('Connection failed');
-    } finally {
-      setBusy(false);
+      setError('Connection failed');
     }
   }
 
   async function handleRecord() {
-    if (!connected || recording) {
+    if (!['CONNECTED', 'READY'].includes(appState) || !recordingReady) {
       return;
     }
-    setBusy(true);
-    setSaveStatus('idle');
-    setSaveMessage('');
+
+    setStatusMessage('');
     setFilename('');
     setFileSize(null);
     setVideoUri(null);
+
     try {
-      const response = await fetch(`${PI_BASE_URL}/recording/start`, {
+      const startResponse = await fetch(`${PI_BASE_URL}/recording/start`, {
         method: 'POST',
       });
-      const data = await response.json();
-      if (data.success) {
-        setRecording(true);
-        setFilename(data.filename);
-      } else {
-        setSaveMessage(data.error || 'Failed to start recording');
+      const startData = await startResponse.json();
+      if (!startData.success) {
+        setError(startData.error || 'Failed to start recording');
+        return;
       }
+
+      const statusData = await fetchPiStatus();
+      setDiagnostics(parseDiagnostics(statusData));
+      if (!statusData.recording) {
+        setError('Pi did not confirm recording');
+        return;
+      }
+
+      setFilename(startData.filename);
+      setAppState('RECORDING');
     } catch {
-      setSaveMessage('Failed to start recording');
-    } finally {
-      setBusy(false);
+      setError('Failed to start recording');
     }
   }
 
   async function handleStop() {
-    if (!recording) {
+    if (appState !== 'RECORDING') {
       return;
     }
-    setBusy(true);
-    setSaveStatus('downloading');
-    setSaveMessage('Stopping recording...');
+
+    setAppState('STOPPING');
+    setStatusMessage('Stopping recording...');
+
     try {
       const response = await fetch(`${PI_BASE_URL}/recording/stop`, {
         method: 'POST',
       });
       const data = await response.json();
       if (!data.success) {
-        setSaveStatus('error');
-        setSaveMessage(data.error || 'Failed to stop recording');
-        setRecording(false);
+        setError(data.error || 'Failed to stop recording');
         return;
       }
 
-      setRecording(false);
       setFilename(data.filename);
-      setSaveMessage('Downloading...');
+      setAppState('DOWNLOADING');
+      setStatusMessage('Downloading...');
 
       await ensureSaveDir();
       const localPath = `${SAVE_DIR}${data.filename}`;
-      await FileSystem.downloadAsync(
-        `${PI_BASE_URL}${data.downloadUrl}`,
-        localPath
-      );
+      await downloadWithTimeout(`${PI_BASE_URL}${data.downloadUrl}`, localPath);
+
+      setAppState('SAVING');
+      setStatusMessage('Saving...');
 
       const localSize = await verifyLocalFile(localPath);
-
-      setSaveMessage('Verifying playback...');
-      try {
-        await verifyVideoPlayback(verifyVideoRef, localPath);
-      } catch {
-        setSaveStatus('error');
-        setSaveMessage('Video playback verification failed');
-        return;
-      }
-
-      setFileSize(localSize);
-      setVideoUri(localPath);
-      setSaveStatus('saved');
-      setSaveMessage('Saved to phone');
+      await verifyVideoPlayback(verifyVideoRef, localPath);
 
       const deleteResponse = await fetch(
         `${PI_BASE_URL}/recordings/${data.filename}`,
         { method: 'DELETE' }
       );
-      if (!deleteResponse.ok) {
-        setSaveMessage('Saved to phone (Pi cleanup failed)');
+
+      setFileSize(localSize);
+      setVideoUri(localPath);
+      setAppState('READY');
+      setStatusMessage(
+        deleteResponse.ok
+          ? 'Saved to phone'
+          : 'Saved to phone (Pi cleanup failed)'
+      );
+    } catch (error) {
+      const message =
+        error instanceof Error ? error.message : 'Failed to stop or save recording';
+      if (message === 'Video failed to load' || message === 'Video player not ready') {
+        setError('Video playback verification failed');
+        return;
       }
-    } catch {
-      setSaveStatus('error');
-      setSaveMessage('Failed to stop or save recording');
-      setRecording(false);
-    } finally {
-      setBusy(false);
+      setError(message);
     }
   }
 
@@ -208,22 +258,14 @@ export default function App() {
     return `${size.toLocaleString()} bytes`;
   };
 
-  const recordingReady =
-    diagnostics.rpicamInstalled &&
-    diagnostics.ffmpegInstalled &&
-    diagnostics.recordingDirectoryWritable &&
-    diagnostics.cameraAvailable;
-
   return (
     <ScrollView contentContainerStyle={styles.container}>
       <StatusBar style="auto" />
 
-      <Text style={styles.label}>Connection Status:</Text>
-      <Text style={styles.value}>
-        {connected ? 'Connected' : 'Not Connected'}
-      </Text>
+      <Text style={styles.label}>State:</Text>
+      <Text style={styles.value}>{appState}</Text>
 
-      {connected && (
+      {showDiagnostics && (
         <>
           <Text style={styles.label}>Pi diagnostics:</Text>
           <Text style={styles.value}>
@@ -242,22 +284,28 @@ export default function App() {
       )}
 
       <View style={styles.buttonRow}>
-        <Button title="Connect" onPress={handleConnect} disabled={busy} />
+        <Button
+          title="Connect"
+          onPress={handleConnect}
+          disabled={isBusy || appState === 'RECORDING'}
+        />
         <Button
           title="Record"
           onPress={handleRecord}
-          disabled={!connected || !recordingReady || recording || busy}
+          disabled={
+            !['CONNECTED', 'READY'].includes(appState) ||
+            !recordingReady ||
+            isBusy
+          }
         />
         <Button
           title="Stop"
           onPress={handleStop}
-          disabled={!recording || busy}
+          disabled={appState !== 'RECORDING' || isBusy}
         />
       </View>
 
-      {busy && saveStatus === 'downloading' && (
-        <ActivityIndicator size="large" style={styles.spinner} />
-      )}
+      {isBusy && <ActivityIndicator size="large" style={styles.spinner} />}
 
       <Text style={styles.label}>Filename:</Text>
       <Text style={styles.value}>{filename || '-'}</Text>
@@ -265,12 +313,8 @@ export default function App() {
       <Text style={styles.label}>File size:</Text>
       <Text style={styles.value}>{formatSize(fileSize)}</Text>
 
-      <Text style={styles.label}>Save status:</Text>
-      <Text style={styles.value}>
-        {saveStatus === 'idle'
-          ? '-'
-          : saveMessage || (saveStatus === 'saved' ? 'Saved to phone' : 'Error')}
-      </Text>
+      <Text style={styles.label}>Status message:</Text>
+      <Text style={styles.value}>{statusMessage || '-'}</Text>
 
       {videoUri && (
         <Video
