@@ -872,6 +872,34 @@ def build_recording_filename() -> tuple[str, Path]:
     return filename, RECORDING_DIR / filename
 
 
+def build_recording_ffmpeg_command(output_path: Path) -> list[str]:
+    """Match the manually verified Pi pipeline: rpicam-vid | ffmpeg -> MP4."""
+    return [
+        "ffmpeg",
+        "-y",
+        "-f",
+        "h264",
+        "-r",
+        CAMERA_FPS,
+        "-i",
+        "pipe:0",
+        "-an",
+        "-c:v",
+        "libx264",
+        "-preset",
+        "veryfast",
+        "-pix_fmt",
+        "yuv420p",
+        "-profile:v",
+        "baseline",
+        "-level",
+        "3.1",
+        "-movflags",
+        "+faststart",
+        str(output_path),
+    ]
+
+
 class DirectRecordingManager:
     """Recording-only pipeline: rpicam-vid -> ffmpeg -> MP4 on disk."""
 
@@ -976,35 +1004,7 @@ class DirectRecordingManager:
             started_at = time.time()
             self._process_errors = []
 
-            ffmpeg_command = [
-                "ffmpeg",
-                "-y",
-                "-hide_banner",
-                "-loglevel",
-                "warning",
-                "-fflags",
-                "nobuffer",
-                "-f",
-                "h264",
-                "-r",
-                CAMERA_FPS,
-                "-i",
-                "pipe:0",
-                "-an",
-                "-c:v",
-                "libx264",
-                "-preset",
-                "veryfast",
-                "-pix_fmt",
-                "yuv420p",
-                "-profile:v",
-                "baseline",
-                "-level",
-                "3.1",
-                "-movflags",
-                "+faststart",
-                str(output_path),
-            ]
+            ffmpeg_command = build_recording_ffmpeg_command(output_path)
 
             try:
                 self._camera_process = subprocess.Popen(
@@ -1017,10 +1017,7 @@ class DirectRecordingManager:
                 if self._camera_process.stdout is None:
                     raise CameraInitializationError(CAMERA_INITIALIZATION_FAILED_MESSAGE)
 
-                time.sleep(0.25)
-                if self._camera_process.poll() is not None:
-                    raise CameraInitializationError(CAMERA_INITIALIZATION_FAILED_MESSAGE)
-
+                # Start ffmpeg immediately so rpicam-vid stdout is consumed (avoids pipe deadlock).
                 self._ffmpeg_process = subprocess.Popen(
                     ffmpeg_command,
                     stdin=self._camera_process.stdout,
@@ -1030,8 +1027,8 @@ class DirectRecordingManager:
                 capture_stderr("ffmpeg", self._ffmpeg_process, self._process_errors)
                 self._camera_process.stdout.close()
 
-                time.sleep(RECORDING_WATCHDOG_SECONDS)
-                self._raise_if_process_failed()
+                if self._camera_process.poll() is not None or self._ffmpeg_process.poll() is not None:
+                    raise CameraInitializationError(CAMERA_INITIALIZATION_FAILED_MESSAGE)
 
                 self._active_recording = {
                     "recording_id": recording_id,
@@ -1054,6 +1051,7 @@ class DirectRecordingManager:
                 )
 
                 self._schedule_timeout_timer(recording_id)
+                self._schedule_recording_start_watchdog(recording_id)
 
                 logger.info(
                     "Recording started id=%s path=%s started_at=%s camera_pid=%s ffmpeg_pid=%s free_storage=%d",
@@ -1205,6 +1203,35 @@ class DirectRecordingManager:
         finally:
             with self._lock:
                 self._stopping = False
+
+    def _schedule_recording_start_watchdog(self, recording_id: str) -> None:
+        if RECORDING_WATCHDOG_SECONDS <= 0:
+            return
+
+        def watchdog() -> None:
+            time.sleep(RECORDING_WATCHDOG_SECONDS)
+            with self._lock:
+                if self._active_recording is None:
+                    return
+                if self._active_recording.get("recording_id") != recording_id:
+                    return
+                camera_alive = (
+                    self._camera_process is not None and self._camera_process.poll() is None
+                )
+                ffmpeg_alive = (
+                    self._ffmpeg_process is not None and self._ffmpeg_process.poll() is None
+                )
+                if camera_alive and ffmpeg_alive:
+                    return
+
+            logger.error(
+                "Recording watchdog detected failed processes id=%s diagnostics=%s",
+                recording_id,
+                self._get_process_diagnostics(),
+            )
+            self.force_abort()
+
+        threading.Thread(target=watchdog, daemon=True, name=f"recording-watchdog-{recording_id}").start()
 
     def _schedule_timeout_timer(self, recording_id: str) -> None:
         self._cancel_timeout_timer()
@@ -1684,15 +1711,6 @@ def recording_start() -> tuple[Response, int] | Response:
     try:
         prepare_recording_camera()
         started = recording_manager.start()
-
-        if not recording_manager.processes_running():
-            recording_manager.force_abort()
-            return jsonify(
-                {
-                    "success": False,
-                    "message": CAMERA_INITIALIZATION_FAILED_MESSAGE,
-                }
-            ), 500
 
         return jsonify(
             {
