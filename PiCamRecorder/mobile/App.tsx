@@ -11,7 +11,6 @@ import { Video, ResizeMode } from 'expo-av';
 import * as FileSystem from 'expo-file-system/legacy';
 import { StatusBar } from 'expo-status-bar';
 
-const PI_BASE_URL = 'http://10.136.19.4:5000';
 const SAVE_DIR = `${FileSystem.documentDirectory}PiCamRecorder/`;
 const DOWNLOAD_TIMEOUT_MS = 60_000;
 const DOWNLOAD_TIMEOUT_MESSAGE = 'Download timed out after 60 seconds';
@@ -61,12 +60,29 @@ const BUSY_STATES: AppState[] = [
   'SAVING',
 ];
 
+function getPiBaseUrl() {
+  const baseUrl = process.env.EXPO_PUBLIC_PI_BASE_URL;
+  if (!baseUrl) {
+    throw new Error('EXPO_PUBLIC_PI_BASE_URL is not configured');
+  }
+  return baseUrl.replace(/\/$/, '');
+}
+
 function formatCheck(value: boolean) {
   return value ? 'OK' : 'FAIL';
 }
 
+async function fetchPiHealth() {
+  const response = await fetch(`${getPiBaseUrl()}/health`);
+  const data = await response.json();
+  if (!data.success) {
+    throw new Error('Pi health check failed');
+  }
+  return data;
+}
+
 async function fetchPiStatus() {
-  const response = await fetch(`${PI_BASE_URL}/status`);
+  const response = await fetch(`${getPiBaseUrl()}/status`);
   const data = await response.json();
   if (!data.success) {
     throw new Error('Pi status check failed');
@@ -81,13 +97,18 @@ async function ensureSaveDir() {
   }
 }
 
-async function verifyLocalFile(localPath: string) {
+async function verifyLocalFile(localPath: string, expectedSize: number) {
   const info = await FileSystem.getInfoAsync(localPath);
   if (!info.exists) {
     throw new Error('Downloaded file is missing');
   }
   if (!('size' in info) || !info.size || info.size <= 0) {
     throw new Error('Downloaded file is empty');
+  }
+  if (info.size !== expectedSize) {
+    throw new Error(
+      `Local size ${info.size} does not match remote size ${expectedSize}`
+    );
   }
   return info.size;
 }
@@ -166,9 +187,9 @@ function parseDiagnostics(data: {
   };
 }
 
-function formatPlaybackError(error: unknown) {
+function formatSaveError(error: unknown) {
   const message =
-    error instanceof Error ? error.message : 'Video playback verification failed';
+    error instanceof Error ? error.message : 'Failed to stop or save recording';
   if (
     message === 'Video failed to load' ||
     message === 'Video player not ready'
@@ -206,21 +227,23 @@ export default function App() {
   }
 
   async function downloadSaveAndFinalize(metadata: RecordingMetadata) {
+    const piBaseUrl = getPiBaseUrl();
+
     setAppState('DOWNLOADING');
     setStatusMessage('Downloading...');
 
     await ensureSaveDir();
     const localPath = `${SAVE_DIR}${metadata.filename}`;
-    await downloadWithTimeout(`${PI_BASE_URL}${metadata.downloadUrl}`, localPath);
+    await downloadWithTimeout(`${piBaseUrl}${metadata.downloadUrl}`, localPath);
 
     setAppState('SAVING');
     setStatusMessage('Saving...');
 
-    const savedSize = await verifyLocalFile(localPath);
+    const savedSize = await verifyLocalFile(localPath, metadata.fileSize);
     await verifyVideoPlayback(verifyVideoRef, localPath);
 
     const deleteResponse = await fetch(
-      `${PI_BASE_URL}/recordings/${metadata.filename}`,
+      `${piBaseUrl}/recordings/${metadata.filename}`,
       { method: 'DELETE' }
     );
 
@@ -238,18 +261,21 @@ export default function App() {
     setAppState('CONNECTING');
     setStatusMessage('');
     try {
-      const data = await fetchPiStatus();
-      setDiagnostics(parseDiagnostics(data));
+      const health = await fetchPiHealth();
+      setDiagnostics(parseDiagnostics(health));
 
-      if (data.recording) {
+      const status = await fetchPiStatus();
+      if (status.recording) {
         setAppState('RECORDING');
         return;
       }
 
       setAppState('CONNECTED');
-    } catch {
+    } catch (error) {
       setDiagnostics(EMPTY_DIAGNOSTICS);
-      setError('Connection failed');
+      setError(
+        error instanceof Error ? error.message : 'Connection failed'
+      );
     }
   }
 
@@ -265,7 +291,8 @@ export default function App() {
     setVideoUri(null);
 
     try {
-      const startResponse = await fetch(`${PI_BASE_URL}/recording/start`, {
+      const piBaseUrl = getPiBaseUrl();
+      const startResponse = await fetch(`${piBaseUrl}/recording/start`, {
         method: 'POST',
       });
       const startData = await startResponse.json();
@@ -283,8 +310,10 @@ export default function App() {
 
       setActiveFilename(startData.filename);
       setAppState('RECORDING');
-    } catch {
-      setError('Failed to start recording');
+    } catch (error) {
+      setError(
+        error instanceof Error ? error.message : 'Failed to start recording'
+      );
     }
   }
 
@@ -297,7 +326,7 @@ export default function App() {
     setStatusMessage('Stopping recording...');
 
     try {
-      const response = await fetch(`${PI_BASE_URL}/recording/stop`, {
+      const response = await fetch(`${getPiBaseUrl()}/recording/stop`, {
         method: 'POST',
       });
       const data = await response.json();
@@ -315,7 +344,7 @@ export default function App() {
 
       await downloadSaveAndFinalize(metadata);
     } catch (error) {
-      setError(formatPlaybackError(error));
+      setError(formatSaveError(error));
     }
   }
 
@@ -329,7 +358,7 @@ export default function App() {
     try {
       await downloadSaveAndFinalize(recordingMetadata);
     } catch (error) {
-      setError(formatPlaybackError(error));
+      setError(formatSaveError(error));
     }
   }
 

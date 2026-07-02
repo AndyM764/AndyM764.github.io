@@ -8,7 +8,12 @@ from datetime import datetime
 from flask import Flask, jsonify, send_file
 
 RECORDINGS_DIR = "/tmp/picam-recordings/"
+LOGS_DIR = "/tmp/picam-logs/"
 PORT = 5000
+
+# Pipeline: rpicam-vid (h264 stdout) -> ffmpeg -c copy -> MP4
+# Do not use libx264 re-encode; camera already outputs compatible H.264.
+FFMPEG_OUTPUT_ARGS = ["-c", "copy"]
 
 app = Flask(__name__)
 
@@ -21,6 +26,8 @@ state = {
     "filename": None,
     "rpicam_proc": None,
     "ffmpeg_proc": None,
+    "rpicam_log": None,
+    "ffmpeg_log": None,
 }
 monitor_stop_event = None
 monitor_thread = None
@@ -32,6 +39,18 @@ diagnostics = {
     "recordingDirectoryWritable": False,
     "cameraAvailable": False,
 }
+
+
+def ensure_logs_dir():
+    os.makedirs(LOGS_DIR, exist_ok=True)
+
+
+def write_log(log_name, message):
+    ensure_logs_dir()
+    log_path = os.path.join(LOGS_DIR, log_name)
+    timestamp = datetime.now().isoformat(timespec="seconds")
+    with open(log_path, "a", encoding="utf-8") as handle:
+        handle.write(f"{timestamp} {message}\n")
 
 
 def check_rpicam_installed():
@@ -93,18 +112,43 @@ def run_diagnostics():
     with diagnostics_lock:
         diagnostics.update(results)
 
+    write_log(
+        "diagnostics.log",
+        (
+            "diagnostics "
+            f"rpicam={results['rpicamInstalled']} "
+            f"ffmpeg={results['ffmpegInstalled']} "
+            f"dir={results['recordingDirectoryWritable']} "
+            f"camera={results['cameraAvailable']}"
+        ),
+    )
+
     return results
+
+
+def get_health_payload():
+    results = run_diagnostics()
+    return {
+        "success": True,
+        "cameraAvailable": results["cameraAvailable"],
+        "rpicamInstalled": results["rpicamInstalled"],
+        "ffmpegInstalled": results["ffmpegInstalled"],
+        "recordingDirectoryWritable": results["recordingDirectoryWritable"],
+    }
 
 
 def log_startup_diagnostics(results):
     lines = [
         "PiCamRecorder startup diagnostics:",
+        f"  pipeline: rpicam-vid -> ffmpeg {' '.join(FFMPEG_OUTPUT_ARGS)}",
         f"  rpicam-vid installed: {'yes' if results['rpicamInstalled'] else 'no'}",
         f"  ffmpeg installed: {'yes' if results['ffmpegInstalled'] else 'no'}",
         f"  recording directory writable: {'yes' if results['recordingDirectoryWritable'] else 'no'}",
         f"  camera detected: {'yes' if results['cameraAvailable'] else 'no'}",
     ]
-    print("\n".join(lines), file=sys.stderr)
+    message = "\n".join(lines)
+    print(message, file=sys.stderr)
+    write_log("startup.log", message.replace("\n", " | "))
 
 
 def get_status_payload():
@@ -128,6 +172,15 @@ def get_status_payload():
     return payload
 
 
+def close_process_logs():
+    with recording_lock:
+        for key in ("rpicam_log", "ffmpeg_log"):
+            handle = state.get(key)
+            if handle and not handle.closed:
+                handle.close()
+            state[key] = None
+
+
 def stop_recording_monitor():
     global monitor_stop_event, monitor_thread
     with monitor_lock:
@@ -148,7 +201,9 @@ def mark_recording_failed(reason="Recording failed"):
         state["recordingError"] = reason
         state["rpicam_proc"] = None
         state["ffmpeg_proc"] = None
+    close_process_logs()
     stop_recording_monitor()
+    write_log("recording.log", f"failed {reason}")
 
 
 def recording_monitor_loop(stop_event):
@@ -163,9 +218,13 @@ def recording_monitor_loop(stop_event):
             ffmpeg_proc = state["ffmpeg_proc"]
 
         if rpicam_proc is None or rpicam_proc.poll() is not None:
+            code = None if rpicam_proc is None else rpicam_proc.poll()
+            write_log("recording.log", f"rpicam-vid exited code={code}")
             mark_recording_failed()
             return
         if ffmpeg_proc is None or ffmpeg_proc.poll() is not None:
+            code = None if ffmpeg_proc is None else ffmpeg_proc.poll()
+            write_log("recording.log", f"ffmpeg exited code={code}")
             mark_recording_failed()
             return
 
@@ -200,6 +259,11 @@ def generate_filename():
     return f"recording-{now.strftime('%Y%m%d')}-{now.strftime('%H%M%S')}.mp4"
 
 
+@app.route("/health")
+def health():
+    return jsonify(get_health_payload())
+
+
 @app.route("/status")
 def status():
     return jsonify(get_status_payload())
@@ -210,6 +274,7 @@ def start_recording():
     results = run_diagnostics()
     ready_error = recording_ready_message(results)
     if ready_error:
+        write_log("recording.log", f"start rejected {ready_error}")
         return jsonify({"success": False, "error": ready_error}), 503
 
     with recording_lock:
@@ -244,24 +309,32 @@ def start_recording():
             "h264",
             "-i",
             "pipe:0",
-            "-c",
-            "copy",
+            *FFMPEG_OUTPUT_ARGS,
             filepath,
         ]
+
+        ensure_logs_dir()
+        rpicam_log_path = os.path.join(LOGS_DIR, f"rpicam-{filename}.stderr.log")
+        ffmpeg_log_path = os.path.join(LOGS_DIR, f"ffmpeg-{filename}.stderr.log")
+        rpicam_log = open(rpicam_log_path, "w", encoding="utf-8")
+        ffmpeg_log = open(ffmpeg_log_path, "w", encoding="utf-8")
 
         try:
             rpicam_proc = subprocess.Popen(
                 rpicam_cmd,
                 stdout=subprocess.PIPE,
-                stderr=subprocess.DEVNULL,
+                stderr=rpicam_log,
             )
             ffmpeg_proc = subprocess.Popen(
                 ffmpeg_cmd,
                 stdin=rpicam_proc.stdout,
-                stderr=subprocess.DEVNULL,
+                stderr=ffmpeg_log,
             )
             rpicam_proc.stdout.close()
         except OSError as exc:
+            rpicam_log.close()
+            ffmpeg_log.close()
+            write_log("recording.log", f"start error {exc}")
             return jsonify({"success": False, "error": str(exc)}), 500
 
         state["recording"] = True
@@ -270,7 +343,13 @@ def start_recording():
         state["filename"] = filename
         state["rpicam_proc"] = rpicam_proc
         state["ffmpeg_proc"] = ffmpeg_proc
+        state["rpicam_log"] = rpicam_log
+        state["ffmpeg_log"] = ffmpeg_log
 
+    write_log(
+        "recording.log",
+        f"started {filename} pipeline=rpicam-vid|ffmpeg-{'-'.join(FFMPEG_OUTPUT_ARGS)}",
+    )
     start_recording_monitor()
 
     return jsonify(
@@ -316,12 +395,18 @@ def stop_recording():
         except subprocess.TimeoutExpired:
             ffmpeg_proc.kill()
 
+    close_process_logs()
+
     if not os.path.exists(filepath):
+        write_log("recording.log", f"stop missing file {filename}")
         return jsonify({"success": False, "error": "Recording file not found"}), 500
 
     file_size = os.path.getsize(filepath)
     if file_size == 0:
+        write_log("recording.log", f"stop empty file {filename}")
         return jsonify({"success": False, "error": "Recording file is empty"}), 500
+
+    write_log("recording.log", f"stopped {filename} size={file_size}")
 
     return jsonify(
         {
@@ -346,6 +431,7 @@ def get_recording(filename):
     if file_size == 0:
         return jsonify({"success": False, "error": "File is empty"}), 400
 
+    write_log("downloads.log", f"download {safe_name} size={file_size}")
     return send_file(
         filepath,
         mimetype="video/mp4",
@@ -363,10 +449,13 @@ def delete_recording(filename):
         return jsonify({"success": False, "error": "File not found"}), 404
 
     os.remove(filepath)
+    write_log("downloads.log", f"deleted {safe_name}")
     return jsonify({"success": True})
 
 
 if __name__ == "__main__":
+    ensure_logs_dir()
+    os.makedirs(RECORDINGS_DIR, exist_ok=True)
     startup_results = run_diagnostics()
     log_startup_diagnostics(startup_results)
     app.run(host="0.0.0.0", port=PORT)
