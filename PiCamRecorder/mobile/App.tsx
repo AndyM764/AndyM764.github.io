@@ -26,6 +26,12 @@ type AppState =
   | 'READY'
   | 'ERROR';
 
+type RecordingMetadata = {
+  filename: string;
+  fileSize: number;
+  downloadUrl: string;
+};
+
 type PiDiagnostics = {
   cameraAvailable: boolean;
   rpicamInstalled: boolean;
@@ -120,12 +126,26 @@ function parseDiagnostics(data: {
   };
 }
 
+function formatPlaybackError(error: unknown) {
+  const message =
+    error instanceof Error ? error.message : 'Video playback verification failed';
+  if (
+    message === 'Video failed to load' ||
+    message === 'Video player not ready'
+  ) {
+    return 'Video playback verification failed';
+  }
+  return message;
+}
+
 export default function App() {
   const verifyVideoRef = useRef<Video>(null);
   const [appState, setAppState] = useState<AppState>('DISCONNECTED');
   const [diagnostics, setDiagnostics] = useState<PiDiagnostics>(EMPTY_DIAGNOSTICS);
-  const [filename, setFilename] = useState('');
-  const [fileSize, setFileSize] = useState<number | null>(null);
+  const [activeFilename, setActiveFilename] = useState('');
+  const [recordingMetadata, setRecordingMetadata] =
+    useState<RecordingMetadata | null>(null);
+  const [localFileSize, setLocalFileSize] = useState<number | null>(null);
   const [statusMessage, setStatusMessage] = useState('');
   const [videoUri, setVideoUri] = useState<string | null>(null);
 
@@ -136,10 +156,42 @@ export default function App() {
     diagnostics.recordingDirectoryWritable &&
     diagnostics.cameraAvailable;
   const showDiagnostics = !['DISCONNECTED', 'CONNECTING'].includes(appState);
+  const displayFilename = recordingMetadata?.filename || activeFilename;
+  const displayFileSize = localFileSize ?? recordingMetadata?.fileSize ?? null;
+  const showRetryDownload = recordingMetadata !== null && appState === 'ERROR';
 
   function setError(message: string) {
     setStatusMessage(message);
     setAppState('ERROR');
+  }
+
+  async function downloadSaveAndFinalize(metadata: RecordingMetadata) {
+    setAppState('DOWNLOADING');
+    setStatusMessage('Downloading...');
+
+    await ensureSaveDir();
+    const localPath = `${SAVE_DIR}${metadata.filename}`;
+    await downloadWithTimeout(`${PI_BASE_URL}${metadata.downloadUrl}`, localPath);
+
+    setAppState('SAVING');
+    setStatusMessage('Saving...');
+
+    const savedSize = await verifyLocalFile(localPath);
+    await verifyVideoPlayback(verifyVideoRef, localPath);
+
+    const deleteResponse = await fetch(
+      `${PI_BASE_URL}/recordings/${metadata.filename}`,
+      { method: 'DELETE' }
+    );
+
+    setLocalFileSize(savedSize);
+    setVideoUri(localPath);
+    setAppState('READY');
+    setStatusMessage(
+      deleteResponse.ok
+        ? 'Saved to phone'
+        : 'Saved to phone (Pi cleanup failed)'
+    );
   }
 
   async function handleConnect() {
@@ -167,8 +219,9 @@ export default function App() {
     }
 
     setStatusMessage('');
-    setFilename('');
-    setFileSize(null);
+    setActiveFilename('');
+    setRecordingMetadata(null);
+    setLocalFileSize(null);
     setVideoUri(null);
 
     try {
@@ -188,7 +241,7 @@ export default function App() {
         return;
       }
 
-      setFilename(startData.filename);
+      setActiveFilename(startData.filename);
       setAppState('RECORDING');
     } catch {
       setError('Failed to start recording');
@@ -213,41 +266,30 @@ export default function App() {
         return;
       }
 
-      setFilename(data.filename);
-      setAppState('DOWNLOADING');
-      setStatusMessage('Downloading...');
+      const metadata: RecordingMetadata = {
+        filename: data.filename,
+        fileSize: data.fileSize,
+        downloadUrl: data.downloadUrl,
+      };
+      setRecordingMetadata(metadata);
 
-      await ensureSaveDir();
-      const localPath = `${SAVE_DIR}${data.filename}`;
-      await downloadWithTimeout(`${PI_BASE_URL}${data.downloadUrl}`, localPath);
-
-      setAppState('SAVING');
-      setStatusMessage('Saving...');
-
-      const localSize = await verifyLocalFile(localPath);
-      await verifyVideoPlayback(verifyVideoRef, localPath);
-
-      const deleteResponse = await fetch(
-        `${PI_BASE_URL}/recordings/${data.filename}`,
-        { method: 'DELETE' }
-      );
-
-      setFileSize(localSize);
-      setVideoUri(localPath);
-      setAppState('READY');
-      setStatusMessage(
-        deleteResponse.ok
-          ? 'Saved to phone'
-          : 'Saved to phone (Pi cleanup failed)'
-      );
+      await downloadSaveAndFinalize(metadata);
     } catch (error) {
-      const message =
-        error instanceof Error ? error.message : 'Failed to stop or save recording';
-      if (message === 'Video failed to load' || message === 'Video player not ready') {
-        setError('Video playback verification failed');
-        return;
-      }
-      setError(message);
+      setError(formatPlaybackError(error));
+    }
+  }
+
+  async function handleRetryDownload() {
+    if (!recordingMetadata || isBusy) {
+      return;
+    }
+
+    setStatusMessage('Retrying download...');
+
+    try {
+      await downloadSaveAndFinalize(recordingMetadata);
+    } catch (error) {
+      setError(formatPlaybackError(error));
     }
   }
 
@@ -305,13 +347,23 @@ export default function App() {
         />
       </View>
 
+      {showRetryDownload && (
+        <View style={styles.buttonRow}>
+          <Button
+            title="Retry Download"
+            onPress={handleRetryDownload}
+            disabled={isBusy}
+          />
+        </View>
+      )}
+
       {isBusy && <ActivityIndicator size="large" style={styles.spinner} />}
 
       <Text style={styles.label}>Filename:</Text>
-      <Text style={styles.value}>{filename || '-'}</Text>
+      <Text style={styles.value}>{displayFilename || '-'}</Text>
 
       <Text style={styles.label}>File size:</Text>
-      <Text style={styles.value}>{formatSize(fileSize)}</Text>
+      <Text style={styles.value}>{formatSize(displayFileSize)}</Text>
 
       <Text style={styles.label}>Status message:</Text>
       <Text style={styles.value}>{statusMessage || '-'}</Text>
