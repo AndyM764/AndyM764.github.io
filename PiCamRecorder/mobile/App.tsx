@@ -16,9 +16,28 @@ const SAVE_DIR = `${FileSystem.documentDirectory}PiCamRecorder/`;
 
 type SaveStatus = 'idle' | 'downloading' | 'saved' | 'error';
 
+type PiDiagnostics = {
+  cameraAvailable: boolean;
+  rpicamInstalled: boolean;
+  ffmpegInstalled: boolean;
+  recordingDirectoryWritable: boolean;
+};
+
+const EMPTY_DIAGNOSTICS: PiDiagnostics = {
+  cameraAvailable: false,
+  rpicamInstalled: false,
+  ffmpegInstalled: false,
+  recordingDirectoryWritable: false,
+};
+
+function formatCheck(value: boolean) {
+  return value ? 'OK' : 'FAIL';
+}
+
 export default function App() {
   const [connected, setConnected] = useState(false);
   const [recording, setRecording] = useState(false);
+  const [diagnostics, setDiagnostics] = useState<PiDiagnostics>(EMPTY_DIAGNOSTICS);
   const [filename, setFilename] = useState('');
   const [fileSize, setFileSize] = useState<number | null>(null);
   const [saveStatus, setSaveStatus] = useState<SaveStatus>('idle');
@@ -43,12 +62,20 @@ export default function App() {
       if (data.success) {
         setConnected(true);
         setRecording(!!data.recording);
+        setDiagnostics({
+          cameraAvailable: !!data.cameraAvailable,
+          rpicamInstalled: !!data.rpicamInstalled,
+          ffmpegInstalled: !!data.ffmpegInstalled,
+          recordingDirectoryWritable: !!data.recordingDirectoryWritable,
+        });
       } else {
         setConnected(false);
+        setDiagnostics(EMPTY_DIAGNOSTICS);
         setSaveMessage('Connection failed');
       }
     } catch {
       setConnected(false);
+      setDiagnostics(EMPTY_DIAGNOSTICS);
       setSaveMessage('Connection failed');
     } finally {
       setBusy(false);
@@ -148,6 +175,12 @@ export default function App() {
     return `${size.toLocaleString()} bytes`;
   };
 
+  const recordingReady =
+    diagnostics.rpicamInstalled &&
+    diagnostics.ffmpegInstalled &&
+    diagnostics.recordingDirectoryWritable &&
+    diagnostics.cameraAvailable;
+
   return (
     <ScrollView contentContainerStyle={styles.container}>
       <StatusBar style="auto" />
@@ -157,12 +190,30 @@ export default function App() {
         {connected ? 'Connected' : 'Not Connected'}
       </Text>
 
+      {connected && (
+        <>
+          <Text style={styles.label}>Pi diagnostics:</Text>
+          <Text style={styles.value}>
+            rpicam-vid: {formatCheck(diagnostics.rpicamInstalled)}
+          </Text>
+          <Text style={styles.value}>
+            ffmpeg: {formatCheck(diagnostics.ffmpegInstalled)}
+          </Text>
+          <Text style={styles.value}>
+            recording dir: {formatCheck(diagnostics.recordingDirectoryWritable)}
+          </Text>
+          <Text style={styles.value}>
+            camera: {formatCheck(diagnostics.cameraAvailable)}
+          </Text>
+        </>
+      )}
+
       <View style={styles.buttonRow}>
         <Button title="Connect" onPress={handleConnect} disabled={busy} />
         <Button
           title="Record"
           onPress={handleRecord}
-          disabled={!connected || recording || busy}
+          disabled={!connected || !recordingReady || recording || busy}
         />
         <Button
           title="Stop"

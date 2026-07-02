@@ -1,6 +1,7 @@
 import os
 import shutil
 import subprocess
+import sys
 import threading
 from datetime import datetime
 
@@ -19,13 +20,113 @@ state = {
     "ffmpeg_proc": None,
 }
 
+diagnostics_lock = threading.Lock()
+diagnostics = {
+    "rpicamInstalled": False,
+    "ffmpegInstalled": False,
+    "recordingDirectoryWritable": False,
+    "cameraAvailable": False,
+}
 
-def ensure_recordings_dir():
-    os.makedirs(RECORDINGS_DIR, exist_ok=True)
+
+def check_rpicam_installed():
+    return shutil.which("rpicam-vid") is not None
 
 
-def camera_available():
-    return shutil.which("rpicam-vid") is not None and shutil.which("ffmpeg") is not None
+def check_ffmpeg_installed():
+    return shutil.which("ffmpeg") is not None
+
+
+def check_recording_directory_writable():
+    try:
+        os.makedirs(RECORDINGS_DIR, exist_ok=True)
+        test_file = os.path.join(RECORDINGS_DIR, ".write-test")
+        with open(test_file, "w", encoding="utf-8") as handle:
+            handle.write("ok")
+        os.remove(test_file)
+        return True
+    except OSError:
+        return False
+
+
+def check_camera_available():
+    if not check_rpicam_installed():
+        return False
+
+    try:
+        result = subprocess.run(
+            ["rpicam-vid", "--list-cameras"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+
+    if result.returncode != 0:
+        return False
+
+    output = f"{result.stdout}\n{result.stderr}"
+    return "Available cameras" in output and "0 :" in output
+
+
+def run_diagnostics():
+    results = {
+        "rpicamInstalled": check_rpicam_installed(),
+        "ffmpegInstalled": check_ffmpeg_installed(),
+        "recordingDirectoryWritable": check_recording_directory_writable(),
+        "cameraAvailable": False,
+    }
+    if (
+        results["rpicamInstalled"]
+        and results["ffmpegInstalled"]
+        and results["recordingDirectoryWritable"]
+    ):
+        results["cameraAvailable"] = check_camera_available()
+
+    with diagnostics_lock:
+        diagnostics.update(results)
+
+    return results
+
+
+def log_startup_diagnostics(results):
+    lines = [
+        "PiCamRecorder startup diagnostics:",
+        f"  rpicam-vid installed: {'yes' if results['rpicamInstalled'] else 'no'}",
+        f"  ffmpeg installed: {'yes' if results['ffmpegInstalled'] else 'no'}",
+        f"  recording directory writable: {'yes' if results['recordingDirectoryWritable'] else 'no'}",
+        f"  camera detected: {'yes' if results['cameraAvailable'] else 'no'}",
+    ]
+    print("\n".join(lines), file=sys.stderr)
+
+
+def get_status_payload():
+    results = run_diagnostics()
+    with recording_lock:
+        recording = state["recording"]
+
+    return {
+        "success": True,
+        "cameraAvailable": results["cameraAvailable"],
+        "rpicamInstalled": results["rpicamInstalled"],
+        "ffmpegInstalled": results["ffmpegInstalled"],
+        "recordingDirectoryWritable": results["recordingDirectoryWritable"],
+        "recording": recording,
+    }
+
+
+def recording_ready_message(results):
+    if not results["rpicamInstalled"]:
+        return "rpicam-vid is not installed"
+    if not results["ffmpegInstalled"]:
+        return "ffmpeg is not installed"
+    if not results["recordingDirectoryWritable"]:
+        return f"{RECORDINGS_DIR} is missing or not writable"
+    if not results["cameraAvailable"]:
+        return "No camera detected"
+    return None
 
 
 def generate_filename():
@@ -35,22 +136,20 @@ def generate_filename():
 
 @app.route("/status")
 def status():
-    return jsonify(
-        {
-            "success": True,
-            "cameraAvailable": camera_available(),
-            "recording": state["recording"],
-        }
-    )
+    return jsonify(get_status_payload())
 
 
 @app.route("/recording/start", methods=["POST"])
 def start_recording():
+    results = run_diagnostics()
+    ready_error = recording_ready_message(results)
+    if ready_error:
+        return jsonify({"success": False, "error": ready_error}), 503
+
     with recording_lock:
         if state["recording"]:
             return jsonify({"success": False, "error": "Already recording"}), 409
 
-        ensure_recordings_dir()
         filename = generate_filename()
         filepath = os.path.join(RECORDINGS_DIR, filename)
 
@@ -193,5 +292,6 @@ def delete_recording(filename):
 
 
 if __name__ == "__main__":
-    ensure_recordings_dir()
+    startup_results = run_diagnostics()
+    log_startup_diagnostics(startup_results)
     app.run(host="0.0.0.0", port=PORT)
