@@ -1,6 +1,7 @@
 from flask import Flask, jsonify
-import subprocess
 import os
+import subprocess
+import threading
 import time
 
 app = Flask(__name__)
@@ -8,8 +9,28 @@ app = Flask(__name__)
 RECORDINGS_DIR = "recordings"
 os.makedirs(RECORDINGS_DIR, exist_ok=True)
 
+state_lock = threading.Lock()
 record_proc = None
 record_filename = None
+
+
+def is_recording():
+    return record_proc is not None and record_proc.poll() is None
+
+
+def clear_dead_proc():
+    global record_proc, record_filename
+    if record_proc is not None and record_proc.poll() is not None:
+        record_proc = None
+        record_filename = None
+
+
+def cleanup_proc(proc):
+    try:
+        proc.wait(timeout=5)
+    except subprocess.TimeoutExpired:
+        proc.kill()
+        proc.wait(timeout=5)
 
 
 @app.route("/health")
@@ -19,8 +40,8 @@ def health():
 
 @app.route("/status")
 def status():
-    global record_proc
-    running = record_proc is not None and record_proc.poll() is None
+    with state_lock:
+        running = is_recording()
     return jsonify({"success": True, "recording": running})
 
 
@@ -28,48 +49,51 @@ def status():
 def start():
     global record_proc, record_filename
 
-    if record_proc is not None and record_proc.poll() is None:
-        return jsonify({"success": False, "error": "Already recording"}), 409
+    with state_lock:
+        clear_dead_proc()
+        if is_recording():
+            return jsonify({"success": False, "error": "Already recording"}), 409
 
-    record_filename = f"rec_{int(time.time())}.h264"
-    filepath = os.path.join(RECORDINGS_DIR, record_filename)
+        filename = f"rec_{int(time.time())}.h264"
+        filepath = os.path.join(RECORDINGS_DIR, filename)
+        record_proc = subprocess.Popen(
+            ["rpicam-vid", "-t", "0", "-o", filepath]
+        )
+        record_filename = filename
 
-    record_proc = subprocess.Popen([
-        "rpicam-vid",
-        "-t", "0",
-        "-o", filepath
-    ])
-
-    return jsonify({
-        "success": True,
-        "recording": True,
-        "filename": record_filename
-    })
+    return jsonify(
+        {
+            "success": True,
+            "recording": True,
+            "filename": filename,
+        }
+    )
 
 
 @app.route("/recording/stop", methods=["POST"])
 def stop():
     global record_proc, record_filename
 
-    if record_proc is None or record_proc.poll() is not None:
-        return jsonify({"success": False, "error": "Not recording"}), 400
+    with state_lock:
+        if not is_recording():
+            return jsonify({"success": False, "error": "Not recording"}), 400
 
-    record_proc.terminate()
-    try:
-        record_proc.wait(timeout=5)
-    except:
-        record_proc.kill()
+        proc = record_proc
+        filename = record_filename
+        record_proc = None
+        record_filename = None
 
-    filename = record_filename
-    record_proc = None
-    record_filename = None
+    proc.terminate()
+    threading.Thread(target=cleanup_proc, args=(proc,), daemon=True).start()
 
-    return jsonify({
-        "success": True,
-        "recording": False,
-        "filename": filename
-    })
+    return jsonify(
+        {
+            "success": True,
+            "recording": False,
+            "filename": filename,
+        }
+    )
 
 
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=5000)
+    app.run(host="0.0.0.0", port=5000, threaded=True)
