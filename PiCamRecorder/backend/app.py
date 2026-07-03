@@ -25,14 +25,6 @@ def clear_dead_proc():
         record_filename = None
 
 
-def cleanup_proc(proc):
-    try:
-        proc.wait(timeout=5)
-    except subprocess.TimeoutExpired:
-        proc.kill()
-        proc.wait(timeout=5)
-
-
 @app.route("/health")
 def health():
     return jsonify({"success": True})
@@ -57,7 +49,10 @@ def start():
         filename = f"rec_{int(time.time())}.h264"
         filepath = os.path.join(RECORDINGS_DIR, filename)
         record_proc = subprocess.Popen(
-            ["rpicam-vid", "-t", "0", "-o", filepath]
+            ["rpicam-vid", "-t", "0", "-o", filepath],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            start_new_session=True,
         )
         record_filename = filename
 
@@ -84,7 +79,6 @@ def stop():
         record_filename = None
 
     proc.terminate()
-    threading.Thread(target=cleanup_proc, args=(proc,), daemon=True).start()
 
     return jsonify(
         {
