@@ -1,97 +1,79 @@
 import os
 import subprocess
-import threading
+from datetime import datetime
 
-from flask import Flask, jsonify, send_file
+from flask import Flask, jsonify
 
 RECORDINGS_DIR = "recordings"
-OUTPUT_FILE = os.path.join(RECORDINGS_DIR, "test.h264")
 PORT = 5000
 
 app = Flask(__name__)
+record_proc = None
+record_filename = None
 
-recording_lock = threading.Lock()
-rpicam_proc = None
-recording = False
+
+def generate_filename():
+    now = datetime.now()
+    return f"recording-{now.strftime('%Y%m%d')}-{now.strftime('%H%M%S')}.h264"
 
 
 @app.route("/health")
 def health():
-    return jsonify({"success": True, "recording": recording})
+    return jsonify({"success": True})
 
 
 @app.route("/status")
 def status():
+    recording = record_proc is not None and record_proc.poll() is None
     return jsonify({"success": True, "recording": recording})
 
 
 @app.route("/recording/start", methods=["POST"])
 def start_recording():
-    global rpicam_proc, recording
+    global record_proc, record_filename
 
-    with recording_lock:
-        if recording:
-            return jsonify({"success": False, "error": "Already recording"}), 409
+    if record_proc is not None and record_proc.poll() is None:
+        return jsonify({"success": False, "error": "Already recording"}), 409
 
-        os.makedirs(RECORDINGS_DIR, exist_ok=True)
-        rpicam_proc = subprocess.Popen(
-            ["rpicam-vid", "-t", "0", "-o", OUTPUT_FILE],
-        )
-        recording = True
+    os.makedirs(RECORDINGS_DIR, exist_ok=True)
+    filename = generate_filename()
+    filepath = os.path.join(RECORDINGS_DIR, filename)
+
+    record_proc = subprocess.Popen(["rpicam-vid", "-t", "0", "-o", filepath])
+    record_filename = filename
 
     return jsonify(
         {
             "success": True,
             "recording": True,
-            "filename": "test.h264",
+            "filename": filename,
         }
     )
 
 
 @app.route("/recording/stop", methods=["POST"])
 def stop_recording():
-    global rpicam_proc, recording
+    global record_proc, record_filename
 
-    with recording_lock:
-        if not recording:
-            return jsonify({"success": False, "error": "Not recording"}), 400
+    if record_proc is None or record_proc.poll() is not None:
+        return jsonify({"success": False, "error": "Not recording"}), 400
 
-        if rpicam_proc and rpicam_proc.poll() is None:
-            rpicam_proc.terminate()
-            try:
-                rpicam_proc.wait(timeout=5)
-            except subprocess.TimeoutExpired:
-                rpicam_proc.kill()
+    filename = record_filename
+    record_proc.terminate()
+    try:
+        record_proc.wait(timeout=5)
+    except subprocess.TimeoutExpired:
+        record_proc.kill()
+        record_proc.wait(timeout=5)
 
-        rpicam_proc = None
-        recording = False
-
-    file_size = os.path.getsize(OUTPUT_FILE) if os.path.exists(OUTPUT_FILE) else 0
+    record_proc = None
 
     return jsonify(
         {
             "success": True,
             "recording": False,
-            "filename": "test.h264",
-            "fileSize": file_size,
-            "downloadUrl": "/recordings/test.h264",
+            "filename": filename,
         }
-    )
-
-
-@app.route("/recordings/<filename>", methods=["GET"])
-def get_recording(filename):
-    if os.path.basename(filename) != "test.h264":
-        return jsonify({"success": False, "error": "File not found"}), 404
-
-    if not os.path.exists(OUTPUT_FILE):
-        return jsonify({"success": False, "error": "File not found"}), 404
-
-    return send_file(
-        OUTPUT_FILE,
-        mimetype="application/octet-stream",
-        as_attachment=True,
-        download_name="test.h264",
     )
 
 
