@@ -22,7 +22,12 @@ class StreamingOutput(io.BufferedIOBase):
 
 def main():
     picam2 = Picamera2()
-    picam2.configure(picam2.create_video_configuration(main={"size": (640, 480)}))
+    picam2.configure(
+        picam2.create_video_configuration(
+            main={"size": (640, 480)},
+            lores={"size": (640, 480), "format": "YUV420"},
+        )
+    )
     picam2.start()
 
     output = StreamingOutput()
@@ -39,7 +44,7 @@ def main():
             timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
             filename = f"recording_{timestamp}.mp4"
             recording_encoder = H264Encoder()
-            picam2.start_encoder(recording_encoder, FfmpegOutput(filename))
+            picam2.start_encoder(recording_encoder, FfmpegOutput(filename), name="lores")
             return True
 
     def stop_recording():
