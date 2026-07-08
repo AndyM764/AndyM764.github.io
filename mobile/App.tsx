@@ -39,18 +39,22 @@ export default function App() {
     const script = `
       (function() {
         var url = ${JSON.stringify(url)} + '?_=' + Date.now();
-        var img = new Image();
-        var done = function(ok, error) {
-          window.ReactNativeWebView.postMessage(JSON.stringify({
-            ok: ok,
-            label: ${JSON.stringify(label)},
-            url: ${JSON.stringify(url)},
-            error: error || undefined
-          }));
-        };
-        img.onload = function() { done(true); };
-        img.onerror = function() { done(true); };
-        img.src = url;
+        fetch(url, { method: 'GET' })
+          .then(function() {
+            window.ReactNativeWebView.postMessage(JSON.stringify({
+              ok: true,
+              label: ${JSON.stringify(label)},
+              url: ${JSON.stringify(url)}
+            }));
+          })
+          .catch(function(error) {
+            window.ReactNativeWebView.postMessage(JSON.stringify({
+              ok: false,
+              label: ${JSON.stringify(label)},
+              url: ${JSON.stringify(url)},
+              error: String(error)
+            }));
+          });
         return true;
       })();
     `;
