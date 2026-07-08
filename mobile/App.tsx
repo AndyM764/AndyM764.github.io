@@ -1,7 +1,11 @@
 import { useRef } from 'react';
 import { Alert, Pressable, StyleSheet, Text, View } from 'react-native';
 import { WebView, WebViewMessageEvent } from 'react-native-webview';
-import { PI_START_RECORDING_URL, PI_STOP_RECORDING_URL, PI_STREAM_URL } from './config';
+import { PI_STREAM_URL } from './config';
+
+const recordingBaseUrl = PI_STREAM_URL.replace(/\/stream$/, '');
+const START_RECORDING_URL = `${recordingBaseUrl}/start-recording`;
+const STOP_RECORDING_URL = `${recordingBaseUrl}/stop-recording`;
 
 const html = `<!DOCTYPE html><html><head><meta name="viewport" content="width=device-width,initial-scale=1"></head><body style="margin:0;background:#000"><img src="${PI_STREAM_URL}" style="width:100vw;height:100vh;object-fit:cover"></body></html>`;
 
@@ -16,6 +20,13 @@ export default function App() {
   const webViewRef = useRef<WebView>(null);
 
   const sendRecordingRequest = (url: string, label: string) => {
+    if (!url) {
+      const message = 'Recording URL is missing. Check PI_STREAM_URL in config.ts.';
+      console.error(`[recording] ${label} failed: ${message}`);
+      Alert.alert(`${label} failed`, message);
+      return;
+    }
+
     console.log(`[recording] ${label} -> ${url}`);
 
     if (!webViewRef.current) {
@@ -83,13 +94,13 @@ export default function App() {
       <View style={styles.controls}>
         <Pressable
           style={styles.button}
-          onPress={() => sendRecordingRequest(PI_START_RECORDING_URL, 'Record')}
+          onPress={() => sendRecordingRequest(START_RECORDING_URL, 'Record')}
         >
           <Text style={styles.buttonText}>Record</Text>
         </Pressable>
         <Pressable
           style={styles.button}
-          onPress={() => sendRecordingRequest(PI_STOP_RECORDING_URL, 'Stop')}
+          onPress={() => sendRecordingRequest(STOP_RECORDING_URL, 'Stop')}
         >
           <Text style={styles.buttonText}>Stop</Text>
         </Pressable>
