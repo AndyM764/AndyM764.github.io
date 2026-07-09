@@ -92,6 +92,21 @@ def main():
                 self.end_headers()
                 return
 
+            if path.startswith("/download/"):
+                filename = os.path.basename(path[len("/download/"):])
+                if not filename or not os.path.isfile(filename):
+                    self.send_response(404)
+                    self.end_headers()
+                    return
+                with open(filename, "rb") as f:
+                    data = f.read()
+                self.send_response(200)
+                self.send_header("Content-Type", "video/mp4")
+                self.send_header("Content-Length", str(len(data)))
+                self.end_headers()
+                self.wfile.write(data)
+                return
+
             if self.path != "/stream":
                 self.send_response(404)
                 self.end_headers()
