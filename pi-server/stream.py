@@ -1,8 +1,10 @@
 #!/usr/bin/env python3
 import datetime
 import io
+import os
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from threading import Condition, Lock
+from urllib.parse import urlparse
 
 from picamera2 import Picamera2
 from picamera2.encoders import H264Encoder, JpegEncoder
@@ -34,37 +36,59 @@ def main():
     picam2.start_encoder(JpegEncoder(), FileOutput(output))
 
     recording_encoder = None
+    recording_output = None
+    recording_filename = None
     recording_lock = Lock()
 
     def start_recording():
-        nonlocal recording_encoder
+        nonlocal recording_encoder, recording_output, recording_filename
         with recording_lock:
             if recording_encoder is not None:
+                print("[recording] start_recording() -> False (already recording)")
                 return False
             timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-            filename = f"recording_{timestamp}.mp4"
+            recording_filename = f"recording_{timestamp}.mp4"
+            recording_output = FfmpegOutput(recording_filename)
             recording_encoder = H264Encoder()
-            picam2.start_encoder(recording_encoder, FfmpegOutput(filename), name="lores")
+            print(f"[recording] starting {os.path.abspath(recording_filename)}")
+            picam2.start_encoder(recording_encoder, recording_output, name="lores")
+            print(f"[recording] start_recording() -> True")
             return True
 
     def stop_recording():
-        nonlocal recording_encoder
+        nonlocal recording_encoder, recording_output, recording_filename
         with recording_lock:
             if recording_encoder is None:
+                print("[recording] stop_recording() -> False (not recording)")
                 return False
+            print(f"[recording] stopping {recording_filename}")
             picam2.stop_encoder(recording_encoder)
             recording_encoder = None
+            recording_output = None
+            path = os.path.abspath(recording_filename) if recording_filename else None
+            if path and os.path.exists(path):
+                print(f"[recording] stopped, file exists ({os.path.getsize(path)} bytes): {path}")
+            else:
+                print(f"[recording] stopped, file missing: {path}")
+            recording_filename = None
+            print("[recording] stop_recording() -> True")
             return True
 
     class Handler(BaseHTTPRequestHandler):
         def do_GET(self):
-            if self.path == "/start-recording":
-                self.send_response(200 if start_recording() else 409)
+            path = urlparse(self.path).path
+
+            if path == "/start-recording":
+                print(f"[recording] GET /start-recording received (raw path={self.path})")
+                started = start_recording()
+                self.send_response(200 if started else 409)
                 self.end_headers()
                 return
 
-            if self.path == "/stop-recording":
-                self.send_response(200 if stop_recording() else 409)
+            if path == "/stop-recording":
+                print(f"[recording] GET /stop-recording received (raw path={self.path})")
+                stopped = stop_recording()
+                self.send_response(200 if stopped else 409)
                 self.end_headers()
                 return
 
