@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 import datetime
+import glob
 import io
 import os
 from http.server import BaseHTTPRequestHandler, HTTPServer
@@ -102,6 +103,21 @@ def main():
                     data = f.read()
                 self.send_response(200)
                 self.send_header("Content-Type", "video/mp4")
+                self.send_header("Content-Length", str(len(data)))
+                self.end_headers()
+                self.wfile.write(data)
+                return
+
+            if path == "/latest-recording":
+                recordings = glob.glob("recording_*.mp4")
+                if not recordings:
+                    self.send_response(404)
+                    self.end_headers()
+                    return
+                latest = max(recordings, key=os.path.getmtime)
+                data = os.path.basename(latest).encode()
+                self.send_response(200)
+                self.send_header("Content-Type", "text/plain")
                 self.send_header("Content-Length", str(len(data)))
                 self.end_headers()
                 self.wfile.write(data)
