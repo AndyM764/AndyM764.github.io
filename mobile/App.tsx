@@ -83,11 +83,32 @@ export default function App() {
         return;
       }
 
-      downloadFilenameRef.current = { resolve, reject };
+      const timeoutId = setTimeout(() => {
+        if (downloadFilenameRef.current) {
+          downloadFilenameRef.current.reject(
+            new Error('Step 1: Timed out waiting for latest-recording response.')
+          );
+          downloadFilenameRef.current = null;
+        }
+      }, 10000);
+
+      downloadFilenameRef.current = {
+        resolve: (filename: string) => {
+          clearTimeout(timeoutId);
+          resolve(filename);
+        },
+        reject: (error: Error) => {
+          clearTimeout(timeoutId);
+          reject(error);
+        },
+      };
 
       const script = `
         (function() {
-          fetch(${JSON.stringify(LATEST_RECORDING_URL)} + '?_=' + Date.now())
+          if (!window.ReactNativeWebView) {
+            return;
+          }
+          fetch('/latest-recording?_=' + Date.now())
             .then(function(response) {
               if (!response.ok) {
                 throw new Error('Step 1: latest-recording returned HTTP ' + response.status);
@@ -185,7 +206,7 @@ export default function App() {
       <WebView
         ref={webViewRef}
         style={styles.webview}
-        source={{ html }}
+        source={{ html, baseUrl: recordingBaseUrl }}
         originWhitelist={['*']}
         onMessage={onWebViewMessage}
       />
