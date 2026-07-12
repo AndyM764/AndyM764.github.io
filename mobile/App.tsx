@@ -138,31 +138,80 @@ export default function App() {
   };
 
   const downloadLatest = async () => {
+    console.log('[download] button pressed');
+
+    let filename: string;
     try {
-      const filename = await fetchLatestFilename();
-      if (!filename) {
-        throw new Error('Step 2: Pi returned an empty filename.');
-      }
-
-      const downloadUrl = `${recordingBaseUrl}/download/${encodeURIComponent(filename)}`;
-      const localUri = `${cacheDirectory}${filename}`;
-      const result = await downloadAsync(downloadUrl, localUri);
-      if (result.status !== 200) {
-        throw new Error(`Step 3: download returned HTTP ${result.status}`);
-      }
-
-      const permission = await MediaLibrary.requestPermissionsAsync();
-      if (permission.status !== 'granted') {
-        throw new Error('Step 5: Media library permission denied.');
-      }
-
-      await MediaLibrary.saveToLibraryAsync(localUri);
-      Alert.alert('Download complete', `Saved ${filename} to Photos.`);
+      console.log('[download] before fetchLatestFilename()');
+      filename = await fetchLatestFilename();
+      console.log('[download] after fetchLatestFilename():', filename);
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
-      console.error('[download] failed:', message);
-      Alert.alert('Download failed', message);
+      console.error('[download] fetchLatestFilename() failed:', message);
+      Alert.alert('Download failed', `fetchLatestFilename: ${message}`);
+      return;
     }
+
+    if (!filename) {
+      const message = 'Step 2: Pi returned an empty filename.';
+      console.error('[download] fetchLatestFilename() failed:', message);
+      Alert.alert('Download failed', message);
+      return;
+    }
+
+    const downloadUrl = `${recordingBaseUrl}/download/${encodeURIComponent(filename)}`;
+    const localUri = `${cacheDirectory}${filename}`;
+
+    let result;
+    try {
+      console.log('[download] before downloadAsync()', downloadUrl);
+      result = await downloadAsync(downloadUrl, localUri);
+      console.log('[download] after downloadAsync():', result.status);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      console.error('[download] downloadAsync() failed:', message);
+      Alert.alert('Download failed', `downloadAsync: ${message}`);
+      return;
+    }
+
+    if (result.status !== 200) {
+      const message = `Step 3: download returned HTTP ${result.status}`;
+      console.error('[download] downloadAsync() failed:', message);
+      Alert.alert('Download failed', message);
+      return;
+    }
+
+    let permission;
+    try {
+      console.log('[download] before requestPermissionsAsync()');
+      permission = await MediaLibrary.requestPermissionsAsync();
+      console.log('[download] after requestPermissionsAsync():', permission.status);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      console.error('[download] requestPermissionsAsync() failed:', message);
+      Alert.alert('Download failed', `requestPermissionsAsync: ${message}`);
+      return;
+    }
+
+    if (permission.status !== 'granted') {
+      const message = 'Step 5: Media library permission denied.';
+      console.error('[download] requestPermissionsAsync() failed:', message);
+      Alert.alert('Download failed', message);
+      return;
+    }
+
+    try {
+      console.log('[download] before saveToLibraryAsync()', localUri);
+      await MediaLibrary.saveToLibraryAsync(localUri);
+      console.log('[download] after saveToLibraryAsync()');
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      console.error('[download] saveToLibraryAsync() failed:', message);
+      Alert.alert('Download failed', `saveToLibraryAsync: ${message}`);
+      return;
+    }
+
+    Alert.alert('Download complete', `Saved ${filename} to Photos.`);
   };
 
   const onWebViewMessage = (event: WebViewMessageEvent) => {
