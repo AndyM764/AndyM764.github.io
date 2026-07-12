@@ -1,11 +1,14 @@
 import { useRef } from 'react';
 import { Alert, Pressable, StyleSheet, Text, View } from 'react-native';
 import { WebView, WebViewMessageEvent } from 'react-native-webview';
+import { cacheDirectory, downloadAsync } from 'expo-file-system/legacy';
+import * as MediaLibrary from 'expo-media-library';
 import { PI_STREAM_URL } from './config';
 
 const recordingBaseUrl = PI_STREAM_URL.replace(/\/stream$/, '');
 const START_RECORDING_URL = `${recordingBaseUrl}/start-recording`;
 const STOP_RECORDING_URL = `${recordingBaseUrl}/stop-recording`;
+const LATEST_RECORDING_URL = `${recordingBaseUrl}/latest-recording`;
 
 const html = `<!DOCTYPE html><html><head><meta name="viewport" content="width=device-width,initial-scale=1"></head><body style="margin:0;background:#000"><img src="${PI_STREAM_URL}" style="width:100vw;height:100vh;object-fit:cover"></body></html>`;
 
@@ -16,8 +19,19 @@ type RecordingMessage = {
   error?: string;
 };
 
+type DownloadFilenameMessage = {
+  label: 'Download';
+  ok: boolean;
+  filename?: string;
+  error?: string;
+};
+
 export default function App() {
   const webViewRef = useRef<WebView>(null);
+  const downloadFilenameRef = useRef<{
+    resolve: (filename: string) => void;
+    reject: (error: Error) => void;
+  } | null>(null);
 
   const sendRecordingRequest = (url: string, label: string) => {
     if (!url) {
@@ -62,11 +76,91 @@ export default function App() {
     webViewRef.current.injectJavaScript(script);
   };
 
+  const fetchLatestFilename = (): Promise<string> => {
+    return new Promise((resolve, reject) => {
+      if (!webViewRef.current) {
+        reject(new Error('Step 1: Preview WebView is not ready.'));
+        return;
+      }
+
+      downloadFilenameRef.current = { resolve, reject };
+
+      const script = `
+        (function() {
+          fetch(${JSON.stringify(LATEST_RECORDING_URL)} + '?_=' + Date.now())
+            .then(function(response) {
+              if (!response.ok) {
+                throw new Error('Step 1: latest-recording returned HTTP ' + response.status);
+              }
+              return response.text();
+            })
+            .then(function(text) {
+              window.ReactNativeWebView.postMessage(JSON.stringify({
+                label: 'Download',
+                ok: true,
+                filename: text.trim()
+              }));
+            })
+            .catch(function(error) {
+              window.ReactNativeWebView.postMessage(JSON.stringify({
+                label: 'Download',
+                ok: false,
+                error: String(error)
+              }));
+            });
+          return true;
+        })();
+      `;
+
+      webViewRef.current.injectJavaScript(script);
+    });
+  };
+
+  const downloadLatest = async () => {
+    try {
+      const filename = await fetchLatestFilename();
+      if (!filename) {
+        throw new Error('Step 2: Pi returned an empty filename.');
+      }
+
+      const downloadUrl = `${recordingBaseUrl}/download/${encodeURIComponent(filename)}`;
+      const localUri = `${cacheDirectory}${filename}`;
+      const result = await downloadAsync(downloadUrl, localUri);
+      if (result.status !== 200) {
+        throw new Error(`Step 3: download returned HTTP ${result.status}`);
+      }
+
+      const permission = await MediaLibrary.requestPermissionsAsync();
+      if (permission.status !== 'granted') {
+        throw new Error('Step 5: Media library permission denied.');
+      }
+
+      await MediaLibrary.saveToLibraryAsync(localUri);
+      Alert.alert('Download complete', `Saved ${filename} to Photos.`);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      console.error('[download] failed:', message);
+      Alert.alert('Download failed', message);
+    }
+  };
+
   const onWebViewMessage = (event: WebViewMessageEvent) => {
     let data: RecordingMessage;
     try {
       data = JSON.parse(event.nativeEvent.data);
     } catch {
+      return;
+    }
+
+    if (data.label === 'Download') {
+      const pending = downloadFilenameRef.current;
+      downloadFilenameRef.current = null;
+      const downloadData = data as DownloadFilenameMessage;
+      if (downloadData.ok && downloadData.filename) {
+        pending?.resolve(downloadData.filename);
+      } else {
+        pending?.reject(new Error(downloadData.error ?? 'Step 1: latest-recording failed.'));
+      }
       return;
     }
 
@@ -108,6 +202,9 @@ export default function App() {
         >
           <Text style={styles.buttonText}>Stop</Text>
         </Pressable>
+        <Pressable style={styles.button} onPress={downloadLatest}>
+          <Text style={styles.buttonText}>Download</Text>
+        </Pressable>
       </View>
     </View>
   );
@@ -126,10 +223,10 @@ const styles = StyleSheet.create({
   },
   button: {
     backgroundColor: 'rgba(255,255,255,0.9)',
-    paddingHorizontal: 24,
+    paddingHorizontal: 18,
     paddingVertical: 12,
     borderRadius: 24,
-    marginHorizontal: 8,
+    marginHorizontal: 6,
   },
   buttonText: {
     fontSize: 16,
