@@ -65,54 +65,35 @@ export default function App() {
     webViewRef.current.injectJavaScript(script);
   };
 
-  const fetchLatestFilename = (): Promise<string> => {
+  const fetchLatestFilename = async (): Promise<string> => {
     const url = `${LATEST_RECORDING_URL}?_=${Date.now()}`;
+    console.log('[download] fetchLatestFilename native fetch ->', url);
 
-    return new Promise((resolve, reject) => {
-      let settled = false;
+    const abortController = new AbortController();
+    const timeoutId = setTimeout(() => abortController.abort(), 10000);
 
-      const finish = (fn: () => void) => {
-        if (settled) {
-          return;
-        }
-        settled = true;
-        clearTimeout(timeoutId);
-        abortController.abort();
-        fn();
-      };
+    try {
+      const response = await fetch(url, { method: 'GET', signal: abortController.signal });
+      clearTimeout(timeoutId);
 
-      const abortController = new AbortController();
-      const timeoutId = setTimeout(() => {
-        finish(() =>
-          reject(new Error('Step 1: Timed out waiting for latest-recording response.'))
-        );
-      }, 10000);
+      if (!response.ok) {
+        throw new Error(`Step 1: latest-recording returned HTTP ${response.status}`);
+      }
 
-      fetch(url, { method: 'GET', signal: abortController.signal })
-        .then((response) => {
-          if (!response.ok) {
-            throw new Error(`Step 1: latest-recording returned HTTP ${response.status}`);
-          }
-          return response.text();
-        })
-        .then((text) => {
-          const filename = text.trim();
-          if (!filename) {
-            throw new Error('Step 2: Pi returned an empty filename.');
-          }
-          finish(() => resolve(filename));
-        })
-        .catch((error) => {
-          if (error instanceof Error && error.name === 'AbortError') {
-            finish(() =>
-              reject(new Error('Step 1: Timed out waiting for latest-recording response.'))
-            );
-            return;
-          }
-          const message = error instanceof Error ? error.message : String(error);
-          finish(() => reject(new Error(message)));
-        });
-    });
+      const filename = (await response.text()).trim();
+      if (!filename) {
+        throw new Error('Step 2: Pi returned an empty filename.');
+      }
+
+      console.log('[download] fetchLatestFilename native fetch filename:', filename);
+      return filename;
+    } catch (error) {
+      clearTimeout(timeoutId);
+      if (error instanceof Error && error.name === 'AbortError') {
+        throw new Error('Step 1: Timed out waiting for latest-recording response.');
+      }
+      throw error instanceof Error ? error : new Error(String(error));
+    }
   };
 
   const downloadLatest = async () => {
