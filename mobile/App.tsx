@@ -1,7 +1,7 @@
 import { useRef } from 'react';
 import { Alert, Pressable, StyleSheet, Text, View } from 'react-native';
 import { WebView, WebViewMessageEvent } from 'react-native-webview';
-import { cacheDirectory, downloadAsync } from 'expo-file-system/legacy';
+import { cacheDirectory, EncodingType, writeAsStringAsync } from 'expo-file-system/legacy';
 import * as MediaLibrary from 'expo-media-library';
 import { PI_STREAM_URL } from './config';
 
@@ -9,6 +9,10 @@ const recordingBaseUrl = PI_STREAM_URL.replace(/\/stream$/, '');
 const START_RECORDING_URL = `${recordingBaseUrl}/start-recording`;
 const STOP_RECORDING_URL = `${recordingBaseUrl}/stop-recording`;
 const LATEST_RECORDING_URL = `${recordingBaseUrl}/latest-recording`;
+
+const FILENAME_TIMEOUT_MS = 10000;
+const FILE_DOWNLOAD_TIMEOUT_MS = 120000;
+const WEBVIEW_CHUNK_SIZE = 32768;
 
 const html = `<!DOCTYPE html><html><head><meta name="viewport" content="width=device-width,initial-scale=1"></head><body style="margin:0;background:#000"><img src="${PI_STREAM_URL}" style="width:100vw;height:100vh;object-fit:cover"></body></html>`;
 
@@ -20,18 +24,39 @@ type RecordingMessage = {
 };
 
 type DownloadFilenameMessage = {
-  label: 'Download';
+  label: 'DownloadFilename';
   ok: boolean;
   filename?: string;
   error?: string;
 };
 
+type DownloadFileMessage = {
+  label: 'DownloadFile';
+  phase: 'start' | 'chunk' | 'done' | 'error';
+  totalChunks?: number;
+  index?: number;
+  data?: string;
+  error?: string;
+};
+
+type PendingDownloadFilename = {
+  resolve: (filename: string) => void;
+  reject: (error: Error) => void;
+};
+
+type PendingDownloadFile = {
+  resolve: (localUri: string) => void;
+  reject: (error: Error) => void;
+  localUri: string;
+  chunks: string[];
+  totalChunks: number;
+  receivedChunks: number;
+};
+
 export default function App() {
   const webViewRef = useRef<WebView>(null);
-  const downloadFilenameRef = useRef<{
-    resolve: (filename: string) => void;
-    reject: (error: Error) => void;
-  } | null>(null);
+  const downloadFilenameRef = useRef<PendingDownloadFilename | null>(null);
+  const downloadFileRef = useRef<PendingDownloadFile | null>(null);
 
   const sendRecordingRequest = (url: string, label: string) => {
     if (!url) {
@@ -91,7 +116,7 @@ export default function App() {
         settled = true;
         downloadFilenameRef.current = null;
         reject(new Error('Step 1: Timed out waiting for latest-recording response.'));
-      }, 10000);
+      }, FILENAME_TIMEOUT_MS);
 
       downloadFilenameRef.current = {
         resolve: (filename: string) => {
@@ -129,15 +154,129 @@ export default function App() {
             })
             .then(function(text) {
               window.ReactNativeWebView.postMessage(JSON.stringify({
-                label: 'Download',
+                label: 'DownloadFilename',
                 ok: true,
                 filename: text.trim()
               }));
             })
             .catch(function(error) {
               window.ReactNativeWebView.postMessage(JSON.stringify({
-                label: 'Download',
+                label: 'DownloadFilename',
                 ok: false,
+                error: String(error)
+              }));
+            });
+          return true;
+        })();
+      `;
+
+      webViewRef.current.injectJavaScript(script);
+    });
+  };
+
+  const downloadFileViaWebView = (filename: string): Promise<string> => {
+    const downloadUrl = `${recordingBaseUrl}/download/${encodeURIComponent(filename)}`;
+    const localUri = `${cacheDirectory}${filename}`;
+
+    return new Promise((resolve, reject) => {
+      if (!webViewRef.current) {
+        reject(new Error('Step 2: Preview WebView is not ready.'));
+        return;
+      }
+
+      let settled = false;
+      const timeoutId = setTimeout(() => {
+        if (settled) {
+          return;
+        }
+        settled = true;
+        downloadFileRef.current = null;
+        reject(new Error('Step 2: Timed out waiting for MP4 download.'));
+      }, FILE_DOWNLOAD_TIMEOUT_MS);
+
+      const finish = (handler: () => void) => {
+        if (settled) {
+          return;
+        }
+        settled = true;
+        clearTimeout(timeoutId);
+        downloadFileRef.current = null;
+        handler();
+      };
+
+      downloadFileRef.current = {
+        resolve: (uri: string) => finish(() => resolve(uri)),
+        reject: (error: Error) => finish(() => reject(error)),
+        localUri,
+        chunks: [],
+        totalChunks: 0,
+        receivedChunks: 0,
+      };
+
+      console.log('[download] downloadFileViaWebView ->', downloadUrl);
+
+      const script = `
+        (function() {
+          var url = ${JSON.stringify(downloadUrl)} + '?_=' + Date.now();
+          var chunkSize = ${WEBVIEW_CHUNK_SIZE};
+          fetch(url, { method: 'GET' })
+            .then(function(response) {
+              if (!response.ok) {
+                throw new Error('Step 2: download returned HTTP ' + response.status);
+              }
+              return response.arrayBuffer();
+            })
+            .then(function(buffer) {
+              var bytes = new Uint8Array(buffer);
+              var totalChunks = bytes.length === 0 ? 0 : Math.ceil(bytes.length / chunkSize);
+              window.ReactNativeWebView.postMessage(JSON.stringify({
+                label: 'DownloadFile',
+                phase: 'start',
+                totalChunks: totalChunks
+              }));
+
+              function encodeSlice(slice) {
+                var binary = '';
+                var step = 0x8000;
+                for (var i = 0; i < slice.length; i += step) {
+                  binary += String.fromCharCode.apply(null, slice.subarray(i, i + step));
+                }
+                return btoa(binary);
+              }
+
+              function sendChunk(index) {
+                if (index >= totalChunks) {
+                  window.ReactNativeWebView.postMessage(JSON.stringify({
+                    label: 'DownloadFile',
+                    phase: 'done'
+                  }));
+                  return;
+                }
+                var start = index * chunkSize;
+                var end = Math.min(start + chunkSize, bytes.length);
+                var slice = bytes.subarray(start, end);
+                window.ReactNativeWebView.postMessage(JSON.stringify({
+                  label: 'DownloadFile',
+                  phase: 'chunk',
+                  index: index,
+                  data: encodeSlice(slice)
+                }));
+                setTimeout(function() { sendChunk(index + 1); }, 0);
+              }
+
+              if (totalChunks === 0) {
+                window.ReactNativeWebView.postMessage(JSON.stringify({
+                  label: 'DownloadFile',
+                  phase: 'done'
+                }));
+              } else {
+                sendChunk(0);
+              }
+            })
+            .catch(function(error) {
+              window.ReactNativeWebView.postMessage(JSON.stringify({
+                label: 'DownloadFile',
+                phase: 'error',
                 error: String(error)
               }));
             });
@@ -160,35 +299,25 @@ export default function App() {
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       console.error('[download] fetchLatestFilename() failed:', message);
-      Alert.alert('Download failed', `fetchLatestFilename: ${message}`);
+      Alert.alert('Download failed', message);
       return;
     }
 
     if (!filename) {
-      const message = 'Step 2: Pi returned an empty filename.';
+      const message = 'Step 1: Pi returned an empty filename.';
       console.error('[download] fetchLatestFilename() failed:', message);
       Alert.alert('Download failed', message);
       return;
     }
 
-    const downloadUrl = `${recordingBaseUrl}/download/${encodeURIComponent(filename)}`;
-    const localUri = `${cacheDirectory}${filename}`;
-
-    let result;
+    let localUri: string;
     try {
-      console.log('[download] before downloadAsync()', downloadUrl);
-      result = await downloadAsync(downloadUrl, localUri);
-      console.log('[download] after downloadAsync():', result.status);
+      console.log('[download] before downloadFileViaWebView()', filename);
+      localUri = await downloadFileViaWebView(filename);
+      console.log('[download] after downloadFileViaWebView():', localUri);
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
-      console.error('[download] downloadAsync() failed:', message);
-      Alert.alert('Download failed', `downloadAsync: ${message}`);
-      return;
-    }
-
-    if (result.status !== 200) {
-      const message = `Step 3: download returned HTTP ${result.status}`;
-      console.error('[download] downloadAsync() failed:', message);
+      console.error('[download] downloadFileViaWebView() failed:', message);
       Alert.alert('Download failed', message);
       return;
     }
@@ -201,12 +330,12 @@ export default function App() {
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       console.error('[download] requestPermissionsAsync() failed:', message);
-      Alert.alert('Download failed', `requestPermissionsAsync: ${message}`);
+      Alert.alert('Download failed', message);
       return;
     }
 
     if (permission.status !== 'granted') {
-      const message = 'Step 5: Media library permission denied.';
+      const message = 'Step 3: Media library permission denied.';
       console.error('[download] requestPermissionsAsync() failed:', message);
       Alert.alert('Download failed', message);
       return;
@@ -219,31 +348,96 @@ export default function App() {
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       console.error('[download] saveToLibraryAsync() failed:', message);
-      Alert.alert('Download failed', `saveToLibraryAsync: ${message}`);
+      Alert.alert('Download failed', message);
       return;
     }
 
     Alert.alert('Download complete', `Saved ${filename} to Photos.`);
   };
 
+  const handleDownloadFileMessage = async (data: DownloadFileMessage) => {
+    const pending = downloadFileRef.current;
+    if (!pending) {
+      return;
+    }
+
+    if (data.phase === 'start') {
+      pending.totalChunks = data.totalChunks ?? 0;
+      pending.chunks = new Array(pending.totalChunks).fill('');
+      pending.receivedChunks = 0;
+      console.log('[download] downloadFileViaWebView chunks:', pending.totalChunks);
+      return;
+    }
+
+    if (data.phase === 'chunk') {
+      const index = data.index;
+      if (index === undefined || data.data === undefined) {
+        pending.reject(new Error('Step 2: Invalid download chunk.'));
+        return;
+      }
+      if (index < 0 || index >= pending.totalChunks) {
+        pending.reject(new Error(`Step 2: Unexpected chunk index ${index}.`));
+        return;
+      }
+      pending.chunks[index] = data.data;
+      pending.receivedChunks += 1;
+      return;
+    }
+
+    if (data.phase === 'error') {
+      pending.reject(new Error(data.error ?? 'Step 2: MP4 download failed.'));
+      return;
+    }
+
+    if (data.phase !== 'done') {
+      return;
+    }
+
+    if (pending.receivedChunks !== pending.totalChunks) {
+      pending.reject(
+        new Error(
+          `Step 2: Incomplete download (${pending.receivedChunks}/${pending.totalChunks} chunks).`,
+        ),
+      );
+      return;
+    }
+
+    try {
+      const base64 = pending.chunks.join('');
+      await writeAsStringAsync(pending.localUri, base64, { encoding: EncodingType.Base64 });
+      console.log('[download] wrote file to cache:', pending.localUri);
+      pending.resolve(pending.localUri);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      pending.reject(new Error(`Step 2: Failed to write MP4 to cache (${message}).`));
+    }
+  };
+
   const onWebViewMessage = (event: WebViewMessageEvent) => {
-    let data: RecordingMessage;
+    let data: RecordingMessage | DownloadFilenameMessage | DownloadFileMessage;
     try {
       data = JSON.parse(event.nativeEvent.data);
     } catch {
       return;
     }
 
-    if (data.label === 'Download') {
+    if (data.label === 'DownloadFilename') {
       const pending = downloadFilenameRef.current;
-      downloadFilenameRef.current = null;
+      if (!pending) {
+        return;
+      }
       const downloadData = data as DownloadFilenameMessage;
       if (downloadData.ok && downloadData.filename) {
         console.log('[download] fetchLatestFilename webview filename:', downloadData.filename);
-        pending?.resolve(downloadData.filename);
+        pending.resolve(downloadData.filename);
       } else {
-        pending?.reject(new Error(downloadData.error ?? 'Step 1: latest-recording failed.'));
+        pending.reject(new Error(downloadData.error ?? 'Step 1: latest-recording failed.'));
       }
+      return;
+    }
+
+    if (data.label === 'DownloadFile') {
+      void handleDownloadFileMessage(data as DownloadFileMessage);
       return;
     }
 
