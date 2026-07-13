@@ -11,7 +11,9 @@ const STOP_RECORDING_URL = `${recordingBaseUrl}/stop-recording`;
 const LATEST_RECORDING_URL = `${recordingBaseUrl}/latest-recording`;
 
 const FILENAME_TIMEOUT_MS = 10000;
-const FILE_DOWNLOAD_TIMEOUT_MS = 120000;
+// 30s 640x480 H264 is typically ~3-12 MB; allow time for fetch + chunked postMessage transfer.
+const FILE_DOWNLOAD_TIMEOUT_MS = 300000;
+// 32 KB raw per chunk (~44 KB base64 in JSON) stays well under iOS postMessage practical limits.
 const WEBVIEW_CHUNK_SIZE = 32768;
 
 const html = `<!DOCTYPE html><html><head><meta name="viewport" content="width=device-width,initial-scale=1"></head><body style="margin:0;background:#000"><img src="${PI_STREAM_URL}" style="width:100vw;height:100vh;object-fit:cover"></body></html>`;
@@ -57,6 +59,7 @@ export default function App() {
   const webViewRef = useRef<WebView>(null);
   const downloadFilenameRef = useRef<PendingDownloadFilename | null>(null);
   const downloadFileRef = useRef<PendingDownloadFile | null>(null);
+  const isDownloadingRef = useRef(false);
 
   const sendRecordingRequest = (url: string, label: string) => {
     if (!url) {
@@ -289,70 +292,68 @@ export default function App() {
   };
 
   const downloadLatest = async () => {
+    if (isDownloadingRef.current) {
+      return;
+    }
+    isDownloadingRef.current = true;
     console.log('[download] button pressed');
 
-    let filename: string;
     try {
-      console.log('[download] before fetchLatestFilename()');
-      filename = await fetchLatestFilename();
-      console.log('[download] after fetchLatestFilename():', filename);
+      let filename: string;
+      try {
+        console.log('[download] before fetchLatestFilename()');
+        filename = await fetchLatestFilename();
+        console.log('[download] after fetchLatestFilename():', filename);
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        throw new Error(message);
+      }
+
+      if (!filename) {
+        throw new Error('Step 1: Pi returned an empty filename.');
+      }
+
+      let localUri: string;
+      try {
+        console.log('[download] before downloadFileViaWebView()', filename);
+        localUri = await downloadFileViaWebView(filename);
+        console.log('[download] after downloadFileViaWebView():', localUri);
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        throw new Error(message);
+      }
+
+      let permission;
+      try {
+        console.log('[download] before requestPermissionsAsync()');
+        permission = await MediaLibrary.requestPermissionsAsync();
+        console.log('[download] after requestPermissionsAsync():', permission.status);
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        throw new Error(message);
+      }
+
+      if (permission.status !== 'granted') {
+        throw new Error('Step 3: Media library permission denied.');
+      }
+
+      try {
+        console.log('[download] before saveToLibraryAsync()', localUri);
+        await MediaLibrary.saveToLibraryAsync(localUri);
+        console.log('[download] after saveToLibraryAsync()');
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        throw new Error(message);
+      }
+
+      Alert.alert('Download complete', `Saved ${filename} to Photos.`);
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
-      console.error('[download] fetchLatestFilename() failed:', message);
+      console.error('[download] failed:', message);
       Alert.alert('Download failed', message);
-      return;
+    } finally {
+      isDownloadingRef.current = false;
     }
-
-    if (!filename) {
-      const message = 'Step 1: Pi returned an empty filename.';
-      console.error('[download] fetchLatestFilename() failed:', message);
-      Alert.alert('Download failed', message);
-      return;
-    }
-
-    let localUri: string;
-    try {
-      console.log('[download] before downloadFileViaWebView()', filename);
-      localUri = await downloadFileViaWebView(filename);
-      console.log('[download] after downloadFileViaWebView():', localUri);
-    } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      console.error('[download] downloadFileViaWebView() failed:', message);
-      Alert.alert('Download failed', message);
-      return;
-    }
-
-    let permission;
-    try {
-      console.log('[download] before requestPermissionsAsync()');
-      permission = await MediaLibrary.requestPermissionsAsync();
-      console.log('[download] after requestPermissionsAsync():', permission.status);
-    } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      console.error('[download] requestPermissionsAsync() failed:', message);
-      Alert.alert('Download failed', message);
-      return;
-    }
-
-    if (permission.status !== 'granted') {
-      const message = 'Step 3: Media library permission denied.';
-      console.error('[download] requestPermissionsAsync() failed:', message);
-      Alert.alert('Download failed', message);
-      return;
-    }
-
-    try {
-      console.log('[download] before saveToLibraryAsync()', localUri);
-      await MediaLibrary.saveToLibraryAsync(localUri);
-      console.log('[download] after saveToLibraryAsync()');
-    } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      console.error('[download] saveToLibraryAsync() failed:', message);
-      Alert.alert('Download failed', message);
-      return;
-    }
-
-    Alert.alert('Download complete', `Saved ${filename} to Photos.`);
   };
 
   const handleDownloadFileMessage = async (data: DownloadFileMessage) => {
