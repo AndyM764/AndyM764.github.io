@@ -19,8 +19,19 @@ type RecordingMessage = {
   error?: string;
 };
 
+type DownloadFilenameMessage = {
+  label: 'Download';
+  ok: boolean;
+  filename?: string;
+  error?: string;
+};
+
 export default function App() {
   const webViewRef = useRef<WebView>(null);
+  const downloadFilenameRef = useRef<{
+    resolve: (filename: string) => void;
+    reject: (error: Error) => void;
+  } | null>(null);
 
   const sendRecordingRequest = (url: string, label: string) => {
     if (!url) {
@@ -65,35 +76,77 @@ export default function App() {
     webViewRef.current.injectJavaScript(script);
   };
 
-  const fetchLatestFilename = async (): Promise<string> => {
-    const url = `${LATEST_RECORDING_URL}?_=${Date.now()}`;
-    console.log('[download] fetchLatestFilename native fetch ->', url);
-
-    const abortController = new AbortController();
-    const timeoutId = setTimeout(() => abortController.abort(), 10000);
-
-    try {
-      const response = await fetch(url, { method: 'GET', signal: abortController.signal });
-      clearTimeout(timeoutId);
-
-      if (!response.ok) {
-        throw new Error(`Step 1: latest-recording returned HTTP ${response.status}`);
+  const fetchLatestFilename = (): Promise<string> => {
+    return new Promise((resolve, reject) => {
+      if (!webViewRef.current) {
+        reject(new Error('Step 1: Preview WebView is not ready.'));
+        return;
       }
 
-      const filename = (await response.text()).trim();
-      if (!filename) {
-        throw new Error('Step 2: Pi returned an empty filename.');
-      }
+      let settled = false;
+      const timeoutId = setTimeout(() => {
+        if (settled) {
+          return;
+        }
+        settled = true;
+        downloadFilenameRef.current = null;
+        reject(new Error('Step 1: Timed out waiting for latest-recording response.'));
+      }, 10000);
 
-      console.log('[download] fetchLatestFilename native fetch filename:', filename);
-      return filename;
-    } catch (error) {
-      clearTimeout(timeoutId);
-      if (error instanceof Error && error.name === 'AbortError') {
-        throw new Error('Step 1: Timed out waiting for latest-recording response.');
-      }
-      throw error instanceof Error ? error : new Error(String(error));
-    }
+      downloadFilenameRef.current = {
+        resolve: (filename: string) => {
+          if (settled) {
+            return;
+          }
+          settled = true;
+          clearTimeout(timeoutId);
+          downloadFilenameRef.current = null;
+          resolve(filename);
+        },
+        reject: (error: Error) => {
+          if (settled) {
+            return;
+          }
+          settled = true;
+          clearTimeout(timeoutId);
+          downloadFilenameRef.current = null;
+          reject(error);
+        },
+      };
+
+      const url = LATEST_RECORDING_URL;
+      console.log('[download] fetchLatestFilename webview fetch ->', url);
+
+      const script = `
+        (function() {
+          var url = ${JSON.stringify(url)} + '?_=' + Date.now();
+          fetch(url, { method: 'GET' })
+            .then(function(response) {
+              if (!response.ok) {
+                throw new Error('Step 1: latest-recording returned HTTP ' + response.status);
+              }
+              return response.text();
+            })
+            .then(function(text) {
+              window.ReactNativeWebView.postMessage(JSON.stringify({
+                label: 'Download',
+                ok: true,
+                filename: text.trim()
+              }));
+            })
+            .catch(function(error) {
+              window.ReactNativeWebView.postMessage(JSON.stringify({
+                label: 'Download',
+                ok: false,
+                error: String(error)
+              }));
+            });
+          return true;
+        })();
+      `;
+
+      webViewRef.current.injectJavaScript(script);
+    });
   };
 
   const downloadLatest = async () => {
@@ -178,6 +231,19 @@ export default function App() {
     try {
       data = JSON.parse(event.nativeEvent.data);
     } catch {
+      return;
+    }
+
+    if (data.label === 'Download') {
+      const pending = downloadFilenameRef.current;
+      downloadFilenameRef.current = null;
+      const downloadData = data as DownloadFilenameMessage;
+      if (downloadData.ok && downloadData.filename) {
+        console.log('[download] fetchLatestFilename webview filename:', downloadData.filename);
+        pending?.resolve(downloadData.filename);
+      } else {
+        pending?.reject(new Error(downloadData.error ?? 'Step 1: latest-recording failed.'));
+      }
       return;
     }
 
