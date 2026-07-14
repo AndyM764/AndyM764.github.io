@@ -1,0 +1,25 @@
+{
+  "expo": {
+    "name": "CourtVision.V2",
+    "slug": "courtvision-v2",
+    "version": "1.0.0",
+    "orientation": "portrait",
+    "scheme": "courtvisionv2",
+    "userInterfaceStyle": "automatic",
+    "newArchEnabled": false,
+    "ios": {
+      "supportsTablet": true,
+      "bundleIdentifier": "com.courtvision.v2",
+      "infoPlist": {
+        "NSLocalNetworkUsageDescription": "CourtVision.V2 will use the local network to communicate with Raspberry Pi devices.",
+        "NSAppTransportSecurity": {
+          "NSAllowsLocalNetworking": true
+        }
+      }
+    },
+    "android": {
+      "package": "com.courtvision.v2",
+      "permissions": []
+    }
+  }
+}
