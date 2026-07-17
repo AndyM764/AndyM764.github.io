@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 import io
-from http.server import BaseHTTPRequestHandler, HTTPServer
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from threading import Condition
 
 from picamera2 import Picamera2
@@ -57,7 +57,7 @@ def main():
         def log_message(self, format, *args):
             pass
 
-    HTTPServer(("0.0.0.0", 8080), Handler).serve_forever()
+    ThreadingHTTPServer(("0.0.0.0", 8080), Handler).serve_forever()
 
 
 if __name__ == "__main__":
